@@ -117,6 +117,19 @@ skipped — those are usually notes to the author rather than the text. Use
 `--exclude 'full_*.md'` to skip anything else; the file list is always printed, because
 a directory that also holds a generated merge would otherwise count everything twice.
 
+## Checking a transcription against the scan
+
+```console
+$ quietmd folio.md --facing
+```
+
+Each image is pinned beside the text that follows it: the scan stays put on the left while
+the transcription scrolls on the right, and the next page takes over when you reach it. No
+more switching windows to compare a line against the original. The image is capped at one
+screen so a pinned page is never half out of view; click it for full size.
+
+<p align="center"><img src="docs/facing.png" width="820" alt=""></p>
+
 ## Comparing two drafts
 
 ```console
