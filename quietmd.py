@@ -1464,12 +1464,41 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
 
 
 CHROME_CANDIDATES = [
+    # macOS
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    # Linux 上常见的安装位置
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
 ]
+
+
+def find_chrome() -> str | None:
+    """找一个 Chromium 系浏览器给 --check 用。
+
+    顺序：环境变量 CHROME → 常见安装路径 → PATH。最后这步是为 CI 准备的，
+    那里的浏览器往往装在临时目录里，只能靠 PATH 找到。
+    """
+    import shutil
+
+    env = os.environ.get("CHROME") or os.environ.get("CHROME_PATH")
+    if env and Path(env).is_file():
+        return env
+    for c in CHROME_CANDIDATES:
+        if Path(c).is_file():
+            return c
+    for name in ("google-chrome", "google-chrome-stable", "chromium",
+                 "chromium-browser", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 def check(md_path: Path, mathjax_js: str) -> int:
@@ -1481,9 +1510,10 @@ def check(md_path: Path, mathjax_js: str) -> int:
     import subprocess
     import tempfile
 
-    chrome = next((c for c in CHROME_CANDIDATES if Path(c).is_file()), None)
+    chrome = find_chrome()
     if not chrome:
-        print("找不到 Chrome/Chromium，--check 需要它来真跑一遍 MathJax。", file=sys.stderr)
+        print("找不到 Chrome/Chromium，--check 需要它来真跑一遍 MathJax。\n"
+              "装一个，或用 CHROME=/path/to/chrome 指定。", file=sys.stderr)
         return 2
 
     page = build_html(md_path, mathjax_js, watch=False)
