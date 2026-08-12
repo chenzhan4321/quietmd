@@ -14,7 +14,7 @@
 <p align="center"><img src="docs/style-paper.png" width="820" alt="quietmd, paper style"></p>
 
 ```console
-$ quietmd paper.md            # render and open, one self-contained HTML file
+$ quietmd paper.md            # render and open; writes paper.html next to the source
 $ quietmd paper.md -w         # live preview, reloads on save
 $ quietmd paper.md -o out.html  # just the file — mail it to someone, it works offline
 $ quietmd paper.md --check    # list formulas that failed to render; exit 0 if all fine
@@ -152,9 +152,13 @@ system (`t` to override), font size, page width in four steps (`[` / `]`), long 
 scroll horizontally with a fade hint, double-click any formula to copy its LaTeX,
 print/PDF stylesheet, returns to where you were on reload.
 
-**Output** — images inlined as base64 so the HTML really is one file you can send to
-someone; `<script>`/`<iframe>` in the source are stripped; MathJax embedded, no network
-access at any point after the first run.
+**Output** — the HTML lands next to the source file (`paper.md` → `paper.html`), so it's
+easy to find and easy to hand to someone. If a file of that name already exists and
+wasn't written by quietmd, it writes `paper.quietmd.html` instead and never touches yours;
+if the directory isn't writable it falls back to `~/.cache/quietmd/`. Images are inlined
+as base64 so the HTML really is a single file; `<script>`/`<iframe>` in the source are
+stripped; MathJax is embedded, so nothing touches the network after the first run.
+You'll probably want `*.html` in your `.gitignore`.
 
 **Keys** — `j`/`k` scroll · `g`/`G` top/bottom · `t` theme · `s` style · `h` ToC ·
 `[` `]` width · `⌘F` finds LaTeX source too.

@@ -14,7 +14,7 @@
 <p align="center"><img src="docs/style-paper.png" width="820" alt="quietmd 纸张风格"></p>
 
 ```console
-$ quietmd paper.md              # 渲染并打开，一个自包含 HTML
+$ quietmd paper.md              # 渲染并打开；HTML 就写在源文件旁边（paper.md → paper.html）
 $ quietmd paper.md -w           # 实时预览，存盘即刷新
 $ quietmd paper.md -o out.html  # 只出文件 —— 可以直接发给别人，离线能看
 $ quietmd paper.md --check      # 列出排不出来的公式；全部正常则退出码 0
@@ -140,8 +140,11 @@ Pygments 代码高亮、自动链接。
 页面宽度四档（`[` `]`）、超长公式横向滚动带渐隐提示、双击公式复制 LaTeX、
 打印/存 PDF 样式、刷新后回到原位置。
 
-**产物** —— 图片 base64 内嵌，所以真的是一个可以直接发给别人的文件；
+**产物** —— HTML 就放在源文件旁边（`paper.md` → `paper.html`），好找、也方便直接发给别人。
+如果同名文件已经存在而且不是 quietmd 生成的，会改写成 `paper.quietmd.html`，绝不覆盖你自己的文件；
+目录不可写（只读挂载之类）则退回 `~/.cache/quietmd/`。图片 base64 内嵌，所以真的是单个文件；
 源文档里的 `<script>`/`<iframe>` 会被剥离；MathJax 内嵌，首次下载之后全程不联网。
+你大概会想把 `*.html` 加进 `.gitignore`。
 
 **键盘** —— `j`/`k` 滚动 · `g`/`G` 首尾 · `t` 明暗 · `s` 风格 · `h` 目录 ·
 `[` `]` 宽度 · `⌘F` 连公式的 LaTeX 源码也能搜到。
