@@ -188,7 +188,8 @@ cross-references, and every MathJax extension package.
 **Markdown** — GFM tables, strikethrough, task lists, footnotes, definition lists, YAML
 front matter, Pygments highlighting, autolinks.
 
-**Reading** — side contents following your scroll, progress bar, light/dark following the
+**Reading** — side contents following your scroll, chapters foldable (the one you are
+reading opens itself), progress bar, light/dark following the
 system, long equations scrolling horizontally, double-click a formula to copy its LaTeX,
 print stylesheet, returns to where you were on reload. Keys: `j`/`k` scroll, `g`/`G`
 top/bottom, `t` theme, `s` style, `h` contents, `l` language, `[` `]` width.

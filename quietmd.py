@@ -709,6 +709,21 @@ body{
 }
 #toc a{display:block; color:var(--fg-dim); text-decoration:none;
   padding:.24rem .5rem; border-left:2px solid transparent; border-radius:0 5px 5px 0;}
+/* 章级前面的折叠开关。一本书的目录展开是一百多条，找章得滚半天 —— 
+   开关只出现在真的有子项的章上，没有子项就不放一个点不动的三角。 */
+#toc .sec{display:flex; align-items:flex-start; gap:.1rem}
+#toc .sec > a{flex:1; min-width:0}
+#toc .fold{
+  flex:0 0 auto; margin-top:.28rem; width:15px; height:15px; padding:0;
+  display:inline-flex; align-items:center; justify-content:center;
+  background:transparent; border:0; border-radius:4px; cursor:pointer;
+  color:var(--fg-dim); opacity:.55; transition:opacity .12s, transform .14s;
+}
+#toc .fold:hover{opacity:1; background:var(--bg-soft)}
+#toc .fold svg{width:9px; height:9px; display:block; transition:transform .14s}
+#toc .sec.closed .fold svg{transform:rotate(-90deg)}
+#toc .kids{overflow:hidden}
+#toc .sec.closed + .kids{display:none}
 #toc a:hover{color:var(--fg); background:var(--bg-soft)}
 #toc a.on{color:var(--accent); border-left-color:var(--accent); background:var(--accent-soft)}
 #toc a.l2{padding-left:.5rem}
@@ -1632,6 +1647,45 @@ document.addEventListener('DOMContentLoaded', () => {
   addEventListener('resize', refreshReadouts);
 
 
+
+  // ---- 目录折叠 ------------------------------------------------------
+  // 折起来的章记在 localStorage；正在读的那一章会自动展开，
+  // 否则滚到一个折起来的章里，目录高亮就没了着落。
+  (function () {
+    const box = document.getElementById('toc');
+    if (!box) return;
+    const KEY = 'quietmd-folded';
+    let folded = new Set(JSON.parse(localStorage.getItem(KEY) || '[]'));
+    const apply = () => {
+      box.querySelectorAll('.sec[data-sec]').forEach(sec => {
+        const shut = folded.has(sec.dataset.sec);
+        sec.classList.toggle('closed', shut);
+        const b = sec.querySelector('.fold');
+        if (b) b.setAttribute('aria-expanded', shut ? 'false' : 'true');
+      });
+    };
+    box.addEventListener('click', e => {
+      const b = e.target.closest('.fold');
+      if (!b) return;
+      e.preventDefault();
+      const id = b.closest('.sec').dataset.sec;
+      folded.has(id) ? folded.delete(id) : folded.add(id);
+      localStorage.setItem(KEY, JSON.stringify([...folded]));
+      apply();
+    });
+    apply();
+    // 读到哪一章就把哪一章展开
+    window.__quietmdRevealSection = (id) => {
+      const a = box.querySelector(`a[data-id="${CSS.escape(id)}"]`);
+      const sec = a && (a.closest('.sec') || a.closest('.kids')?.previousElementSibling);
+      if (sec && sec.dataset.sec && folded.has(sec.dataset.sec)) {
+        folded.delete(sec.dataset.sec);
+        localStorage.setItem(KEY, JSON.stringify([...folded]));
+        apply();
+      }
+    };
+  })();
+
   // ---- 查找：正文 / 标题 / 公式源码 / 公式编号 ----------------------
   // 建索引放在 MathJax 跑完之后（公式编号那时才存在），所以挂在 mathReady 上。
   const findBox = document.getElementById('find');
@@ -1762,6 +1816,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (heads[i].getBoundingClientRect().top <= 90) cur = i; else break;
       }
       links.forEach((a, i) => a.classList.toggle('on', i === cur));
+      if (cur >= 0 && window.__quietmdRevealSection)
+        window.__quietmdRevealSection(links[cur].dataset.id);
       if (cur >= 0) {
         const a = links[cur], box = document.getElementById('toc');
         const r = a.getBoundingClientRect(), br = box.getBoundingClientRect();
@@ -1874,17 +1930,46 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 
     toc_html = ""
     if len(toc) >= 2:
+        caret = ('<svg viewBox="0 0 10 10" aria-hidden="true" fill="none" '
+                 'stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
+                 'stroke-linejoin="round"><path d="M2 3.6L5 6.6L8 3.6"/></svg>')
+
         def toc_text(h):
             esc = html.escape(h["text"])
             return h["ph"].sub(
                 lambda m: r"\(" + html.escape(math[int(m.group(1))]["tex"],
                                               quote=False) + r"\)", esc)
 
-        items = "".join(
-            f'<a class="l{h["level"]}" href="#{h["id"]}" data-id="{h["id"]}">'
-            f'{toc_text(h)}</a>'
-            for h in toc
-        )
+        # 按「章 + 它下面的小节」分组，章级带折叠开关。
+        # 章级 = 目录里出现的最浅那一层，因为有的文档从 # 起、有的从 ## 起。
+        top = min(h["level"] for h in toc)
+        chunks: list[str] = []
+        i = 0
+        while i < len(toc):
+            h = toc[i]
+            link = (f'<a class="l{h["level"]}" href="#{h["id"]}" '
+                    f'data-id="{h["id"]}">{toc_text(h)}</a>')
+            if h["level"] != top:
+                chunks.append(link)
+                i += 1
+                continue
+            kids = []
+            j = i + 1
+            while j < len(toc) and toc[j]["level"] != top:
+                k = toc[j]
+                kids.append(f'<a class="l{k["level"]}" href="#{k["id"]}" '
+                            f'data-id="{k["id"]}">{toc_text(k)}</a>')
+                j += 1
+            if kids:
+                chunks.append(
+                    f'<div class="sec" data-sec="{h["id"]}">'
+                    f'<button class="fold" aria-expanded="true" '
+                    f'aria-controls="kids-{h["id"]}">{caret}</button>{link}</div>'
+                    f'<div class="kids" id="kids-{h["id"]}">{"".join(kids)}</div>')
+            else:
+                chunks.append(f'<div class="sec" data-sec="{h["id"]}">{link}</div>')
+            i = j
+        items = "".join(chunks)
         toc_html = f'<nav id="toc" aria-label="{UI[lang]["toc_head"]}"><p class="ttl">{UI[lang]["toc_head"]}</p>{items}</nav>'
 
     name = html.escape(md_path.name + "/" if md_path.is_dir() else md_path.name)
