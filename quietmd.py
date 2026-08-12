@@ -794,7 +794,7 @@ UI = {
         "wider": "W+", "wider_title": "Wider page (])",
         "smaller_title": "Smaller text", "bigger_title": "Larger text",
         "theme_title": "Toggle light / dark (t)", "print_title": "Print / save as PDF",
-        "widths": {"narrow": "Narrow", "normal": "Medium", "wide": "Wide", "full": "Full width"},
+        "width_full": "full width",
         "width_flash": "Page width · ", "copied": "LaTeX copied",
         "err_dead": "{n} won't render", "err_warn": "{n} with unknown commands",
         "err_banner": "In this document: {parts} ({total} formulas) · click to locate each",
@@ -813,7 +813,7 @@ UI = {
         "wider": "宽+", "wider_title": "加宽页面 (])",
         "smaller_title": "缩小字号", "bigger_title": "放大字号",
         "theme_title": "切换明暗 (t)", "print_title": "打印 / 存 PDF",
-        "widths": {"narrow": "窄", "normal": "适中", "wide": "宽", "full": "满幅"},
+        "width_full": "满幅",
         "width_flash": "页面宽度 · ", "copied": "已复制 LaTeX",
         "err_dead": "{n} 处排不出来", "err_warn": "{n} 处含不认识的命令",
         "err_banner": "文档里 {parts}（共 {total} 处公式）· 点击逐条定位",
@@ -853,9 +853,9 @@ ICONS = {
                '<path d="M4.4 9.6h7.2v3.8H4.4z"/></svg>',
 }
 
-# 页面宽度档位（rem）。顶栏的「宽−/宽+」在这四档之间走；
-# 不设 data-width 时跟随当前风格自带的行宽。改这里要同时改 STYLE_CSS 末尾的规则。
-WIDTHS = {"narrow": 34, "normal": 44, "wide": 56, "full": None}
+# 页面宽度由前端连续调节（以 ch 为单位，步进 4ch），不再有离散档位。
+# 保留这两个界限只为和 JS 里的常量对上，改一处要记得改另一处。
+WIDTH_CH_RANGE = (40, 150)
 
 STYLE_CSS = r"""
 /* ===== book：书籍排版。窄栏、首行缩进、标题居中、隐藏侧栏，用来长时间连读 ===== */
@@ -1138,12 +1138,8 @@ html[data-style="github"] article tbody tr:nth-child(2n){background:var(--bg-sof
 html[data-style="github"] article a{border-bottom:0}
 html[data-style="github"] article a:hover{text-decoration:underline}
 
-/* ===== 页面宽度。写在所有风格之后，所以能覆盖各风格自带的默认行宽；
-   不设 data-width（auto）时就跟随当前风格的默认值。 ===== */
-html[data-width="narrow"]{--measure:34rem}
-html[data-width="normal"]{--measure:44rem}
-html[data-width="wide"]  {--measure:56rem}
-html[data-width="full"]  {--measure:none}
+/* 页面宽度不在这里定义：它由顶栏的 stepper 以 inline style 写在 <html> 上
+   （--measure: 76ch 之类），特异性最高，压得过任何风格自带的行宽。 */
 """
 
 
@@ -1313,37 +1309,72 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshReadouts();
   };
 
-  // ---- 页面宽度：四档，读数显示真实行宽 ------------------------------
-  const WKEYS = ['narrow', 'normal', 'wide', 'full'];
-  const WREM  = {narrow: 34, normal: 44, wide: 56, full: Infinity};
-  const curWidthIdx = () => {
-    if (root.dataset.width) return WKEYS.indexOf(root.dataset.width);
-    // 还没手动设过：看当前风格自带的行宽落在哪一档附近，从那里迈步，
-    // 免得第一下跳得莫名其妙
-    const rem = parseFloat(getComputedStyle(root).fontSize) || 16;
-    const mw = getComputedStyle(artEl).maxWidth;
-    const px = (mw === 'none') ? Infinity : parseFloat(mw);
-    let best = 0, bestD = Infinity;
-    WKEYS.forEach((k, i) => {
-      const d = Math.abs(WREM[k] * rem - px);
-      if (d < bestD) { bestD = d; best = i; }
-    });
-    return best;
-  };
-  const stepWidth = (d) => {
-    const i = Math.min(WKEYS.length - 1, Math.max(0, curWidthIdx() + d));
-    root.dataset.width = WKEYS[i];
-    localStorage.setItem('quietmd-width', WKEYS[i]);
+  // ---- 页面宽度：连续调，步进 4ch --------------------------------------
+  // 直接用 CSS 的 ch 单位——它的定义就是「0」字符的宽度，和读数天生一致，
+  // 不必再做一次 rem↔ch 的换算。写成 html 的 inline style，特异性最高，
+  // 所以能压过任何风格自带的行宽。
+  let fs = +(localStorage.getItem('quietmd-fs') || 17);
+  const CH_MIN = 40, CH_MAX = 150, CH_STEP = 4;
+  // null = 跟随当前风格；数字 = 手动指定的 ch；'full' = 满幅
+  let widthSet = (() => {
+    const v = localStorage.getItem('quietmd-width');
+    if (v === 'full') return 'full';
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? n : null;
+  })();
+
+  // 量出正文此刻真实的每行字符数：拿当前字体量一个字符宽，再除栏宽。
+  function measuredCh() {
+    const probe = document.createElement('span');
+    // 必须关掉 proportional/oldstyle 数字：CSS 的 ch 单位按默认字形算「0」的宽度，
+    // 而正文开着 font-variant-numeric，两边对同一个字符的宽度理解会差 5%，
+    // 结果就是设了 72ch 却量出 68ch —— 按一下「+」页面反而变窄。
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;'
+                        + 'font:inherit;font-variant-numeric:normal;'
+                        + 'font-feature-settings:normal';
+    probe.textContent = '0'.repeat(50);
+    artEl.appendChild(probe);
+    const chw = probe.getBoundingClientRect().width / 50;
+    probe.remove();
+    return chw > 0 ? artEl.getBoundingClientRect().width / chw : 0;
+  }
+
+  function applyWidth() {
+    if (widthSet === null) {
+      root.style.removeProperty('--measure');
+      localStorage.removeItem('quietmd-width');
+    } else if (widthSet === 'full') {
+      root.style.setProperty('--measure', 'none');
+      localStorage.setItem('quietmd-width', 'full');
+    } else {
+      root.style.setProperty('--measure', widthSet + 'ch');
+      localStorage.setItem('quietmd-width', String(widthSet));
+    }
     refreshReadouts();
-    flash(t('width_flash') + t('widths')[WKEYS[i]]);
-  };
-  const savedW = localStorage.getItem('quietmd-width');
-  if (savedW && WKEYS.includes(savedW)) root.dataset.width = savedW;
+  }
+
+  function stepWidth(d) {
+    if (widthSet === null) {
+      // 第一次按：从当前风格的实际行宽起步，对齐到步长网格再迈一步，
+      // 免得第一下跳得莫名其妙
+      const base = Math.round(measuredCh() / CH_STEP) * CH_STEP;
+      widthSet = Math.min(CH_MAX, Math.max(CH_MIN, base + d * CH_STEP));
+    } else if (widthSet === 'full') {
+      if (d < 0) widthSet = CH_MAX;          // 从满幅收回来
+    } else {
+      const next = widthSet + d * CH_STEP;
+      if (next > CH_MAX) widthSet = 'full';
+      else widthSet = Math.max(CH_MIN, next);
+    }
+    applyWidth();
+    flash(t('width_flash') + (widthSet === 'full'
+      ? t('width_full') : Math.round(measuredCh()) + 'ch'));
+  }
   document.getElementById('btn-narrower').onclick = () => stepWidth(-1);
   document.getElementById('btn-wider').onclick    = () => stepWidth(+1);
+  applyWidth();
 
   // ---- 字号 ----------------------------------------------------------
-  let fs = +(localStorage.getItem('quietmd-fs') || 17);
   const applyFs = () => {
     root.style.setProperty('--fs', fs + 'px');
     localStorage.setItem('quietmd-fs', fs);
@@ -1355,22 +1386,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---- 两个读数 ------------------------------------------------------
   // 行宽不是查表得来的，是真量出来的：拿正文当前字体量一个字符宽，
   // 再除正文宽度。换风格、换字号它都会跟着变 —— 因为那才是事实。
-  const valMeasure = document.getElementById('val-measure');
-  const valSize = document.getElementById('val-size');
+  // 这里不缓存元素引用：refreshReadouts 会在 const 声明之前被 applyWidth 调到，
+  // 缓存成 const 会撞上暂时性死区，读数就永远停在初始的「—」。
   function refreshReadouts() {
-    const probe = document.createElement('span');
-    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit';
-    probe.textContent = '0'.repeat(50);
-    artEl.appendChild(probe);
-    const chw = probe.getBoundingClientRect().width / 50;
-    probe.remove();
-    const w = artEl.getBoundingClientRect().width;
-    const ch = (chw > 0) ? Math.round(w / chw) : 0;
-    valMeasure.innerHTML = ch + '<u>ch</u>';
-    valSize.innerHTML = fs + '<u>px</u>';
-    const i = curWidthIdx();
-    document.getElementById('btn-narrower').disabled = (i <= 0);
-    document.getElementById('btn-wider').disabled = (i >= WKEYS.length - 1);
+    const ch = Math.round(measuredCh());
+    document.getElementById('val-measure').innerHTML = ch + '<u>ch</u>';
+    document.getElementById('val-size').innerHTML = fs + '<u>px</u>';
+    document.getElementById('btn-narrower').disabled =
+      (widthSet !== 'full' && widthSet !== null && widthSet <= CH_MIN);
+    document.getElementById('btn-wider').disabled = (widthSet === 'full');
     document.getElementById('btn-smaller').disabled = (fs <= 13);
     document.getElementById('btn-bigger').disabled = (fs >= 26);
   }
