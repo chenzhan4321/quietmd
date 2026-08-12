@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# 阅读位置的 sidecar（跟着你的文档走，不跟着仓库走）
+.quietmd-*.json

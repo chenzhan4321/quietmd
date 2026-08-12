@@ -960,6 +960,7 @@ UI = {
         "find_ph": "Find in text, headings, or LaTeX source — a number jumps to that equation",
         "find_h": "heading", "find_t": "text", "find_m": "formula",
         "find_none": "Nothing found.",
+        "resumed": "Picked up where you left off · ",
         "console_dead": "[quietmd] these formulas won't render:",
         "console_warn": "[quietmd] these formulas contain unknown commands:",
     },
@@ -981,6 +982,7 @@ UI = {
         "find_ph": "搜正文、标题或 LaTeX 源码 —— 输入数字跳到该编号的公式",
         "find_h": "标题", "find_t": "正文", "find_m": "公式",
         "find_none": "没找到。",
+        "resumed": "接着上次读到的地方 · ",
         "console_dead": "[quietmd] 这些公式排不出来：",
         "console_warn": "[quietmd] 这些公式里有不认识的命令：",
     },
@@ -1859,6 +1861,48 @@ document.addEventListener('DOMContentLoaded', () => {
 """
 
 WATCH_JS = r"""
+// -w 模式下，把「读到哪一节」回传给本地服务，由它写成 sidecar 文件。
+// 存小节 id 而不是像素位置：改字号、换风格、文中加几段，它都还指着同一处。
+// 静态打开（file://）时没有服务，这段自然不生效，仍然靠 localStorage 记位置。
+(function () {
+  let last = null, timer = null;
+  const currentId = () => {
+    const hs = [...document.querySelectorAll('article h1, article h2, article h3, article h4')];
+    let cur = null;
+    for (const h of hs) {
+      if (h.getBoundingClientRect().top <= 90) cur = h.id; else break;
+    }
+    return cur;
+  };
+  addEventListener('scroll', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const id = currentId();
+      if (!id || id === last) return;
+      last = id;
+      fetch('/__pos', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                       body: JSON.stringify({id})}).catch(() => {});
+    }, 700);
+  }, {passive: true});
+
+  // 打开时，如果这台机器没读过（localStorage 空），就用 sidecar 里记的位置续读
+  addEventListener('load', async () => {
+    if (sessionStorage.getItem(SKEY)) return;
+    try {
+      const r = await fetch('/__pos', {cache: 'no-store'});
+      const {id} = await r.json();
+      const el = id && document.getElementById(id);
+      if (!el) return;
+      // 等 MathJax 排完再跳，否则位置会被后面撑开的公式挤走
+      const go = () => {
+        el.scrollIntoView({block: 'start'});
+        flash(t('resumed') + (el.textContent || '').trim().slice(0, 40));
+      };
+      document.body.dataset.mathReady ? go() : setTimeout(go, 1500);
+    } catch (e) {}
+  });
+})();
+
 // --watch：轮询文件 mtime，变了就重载（滚动位置由 sessionStorage 保住）
 (function(){
   let last = null;
@@ -2042,6 +2086,39 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 # 8. CLI
 # --------------------------------------------------------------------------
 
+
+# --------------------------------------------------------------------------
+# 8b. 阅读位置
+#
+# 页面自己只能把位置记在 localStorage 里，换台机器就没了 —— 浏览器打开 file://
+# 时写不了本地文件。所以 -w（有本地服务）时页面把位置回传，由这边写成一个
+# sidecar 文件；那个文件躺在你的项目目录里，跟着 Dropbox / git 走，就真的跨机器了。
+#
+# 存的是「最近读到的那个小节的 id」而不是像素偏移：改了字号、换了风格、
+# 甚至文档中间加了几段，小节 id 依然指向同一处。
+# --------------------------------------------------------------------------
+
+def state_path(md_path: Path) -> Path:
+    name = md_path.name + (".dir" if md_path.is_dir() else "")
+    return (md_path if md_path.is_dir() else md_path.parent) / f".quietmd-{name}.json"
+
+
+def read_state(md_path: Path) -> dict:
+    f = state_path(md_path)
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(md_path: Path, data: dict) -> None:
+    try:
+        state_path(md_path).write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
           style: str = "paper", lang: str = "en", excl: tuple[str, ...] = ()) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2051,6 +2128,9 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
             pass
 
         def do_GET(self):
+            if self.path.startswith("/__pos"):
+                self._send(json.dumps(read_state(md_path)).encode(), "application/json")
+                return
             if self.path.startswith("/__stamp"):
                 try:
                     if md_path.is_dir():
@@ -2072,6 +2152,18 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
                         f"{html.escape(repr(e))}</pre>")
             self._send(page.encode(), "text/html; charset=utf-8")
 
+        def do_POST(self):
+            if not self.path.startswith("/__pos"):
+                self.send_response(404); self.end_headers(); return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(n) or b"{}")
+                if isinstance(data, dict) and data.get("id"):
+                    write_state(md_path, {"id": str(data["id"])[:200]})
+            except (ValueError, OSError):
+                pass
+            self.send_response(204); self.end_headers()
+
         def _send(self, data: bytes, ctype: str):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -2082,7 +2174,7 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
-    print(f"mdview  {md_path.name}  →  {url}   (存盘自动刷新，Ctrl-C 退出)", flush=True)
+    print(f"quietmd  {md_path.name}  →  {url}   (存盘自动刷新，Ctrl-C 退出)", flush=True)
     if open_browser:
         webbrowser.open(url)
     try:

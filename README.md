@@ -76,6 +76,13 @@ A `\eqref` pointing at a label that doesn't exist renders as `???` and is easy t
 past; a label written twice silently breaks the numbering from there on.
 
 
+Under `-w` your reading position is also written next to the document as
+`.quietmd-<name>.json`, so if that folder is in Dropbox or a repo you carry on from the
+same place on another machine. It records which section you had reached, not a pixel
+offset — change the type size or the style, or add paragraphs above, and it still points
+at the same place. Opening a static HTML can't write files, so there it stays in
+localStorage as before.
+
 ## Finding things
 
 `⌘F` can't find formulas — they're SVG, and in a book with a couple of thousand of them
