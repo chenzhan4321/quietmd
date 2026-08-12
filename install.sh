@@ -15,11 +15,20 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 LIB="$HOME/.local/share/quietmd"
 BIN="$HOME/.local/bin"
 
-command -v uv >/dev/null 2>&1 || {
+# 找 uv 的方式必须和下面写进 wrapper 的那段一致。只用 command -v 是不够的：
+# 非交互式 shell（ssh host './install.sh'）的 PATH 里没有 /opt/homebrew/bin，
+# 明明装了 uv 也会被判定成没装。
+UV=""
+for c in "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.cargo/bin/uv"; do
+    [ -x "$c" ] && UV="$c" && break
+done
+[ -z "$UV" ] && UV="$(command -v uv 2>/dev/null || true)"
+if [ -z "$UV" ]; then
     echo "需要 uv（用来管理 Python 依赖）。装法：" >&2
     echo "  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
     exit 1
-}
+fi
+echo "用的 uv：$UV"
 
 mkdir -p "$LIB" "$BIN"
 cp "$SRC/quietmd.py" "$LIB/quietmd.py"
