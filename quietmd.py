@@ -73,7 +73,8 @@ def default_out(md_path: Path) -> Path:
       就改用 <name>.quietmd.html，绝不覆盖别人的东西。
     - 所在目录不可写（只读挂载之类），退回 ~/.cache/quietmd/。
     """
-    cand = md_path.with_suffix(".html")
+    cand = (md_path.parent / (md_path.name + ".html")) if md_path.is_dir() \
+        else md_path.with_suffix(".html")
     if cand.exists():
         try:
             head = cand.read_text(encoding="utf-8", errors="ignore")[:2000]
@@ -81,7 +82,7 @@ def default_out(md_path: Path) -> Path:
             head = ""
         if QUIETMD_MARK not in head:
             cand = md_path.with_name(md_path.stem + ".quietmd.html")
-    if not os.access(md_path.parent, os.W_OK):
+    if not os.access(cand.parent, os.W_OK):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cand = CACHE_DIR / cand.name
     return cand
@@ -348,6 +349,58 @@ class MathLocker:
 
 
 # --------------------------------------------------------------------------
+# 1b. 目录当一本书
+#
+# 一堆按顺序排的 md 常常就是一份东西：教材的各章、论文的各节、整理稿的各册。
+# 给一个目录就把它们接成一份来读，侧栏目录直接是全书结构。
+#
+# 顺序按文件名排（chapter_01…chapter_08 这类命名本来就是为排序取的）。
+# 以 _ 或 . 开头的文件跳过 —— 那些通常是写作规范、证据清单之类的旁注，不是正文。
+# --------------------------------------------------------------------------
+
+def collect_dir(d: Path, exclude: tuple[str, ...] = ()) -> list[Path]:
+    import fnmatch
+    out = []
+    for f in sorted(d.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in (".md", ".markdown"):
+            continue
+        if f.name.startswith(("_", ".")):
+            continue
+        if any(fnmatch.fnmatch(f.name, pat) for pat in exclude):
+            continue
+        out.append(f)
+    return out
+
+
+def _read_text(f: Path) -> str:
+    raw = f.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def join_dir(d: Path, exclude: tuple[str, ...] = ()) -> tuple[str, list[Path]]:
+    """把目录里的 md 接成一份。返回 (合并后的文本, 用到的文件)。
+
+    只拼接，不重排标题层级 —— 各章的层级是作者定的，替他改会打乱已有的结构。
+    每份自己的 front matter 只保留第一份的，否则正文中间会冒出几行 --- 。
+    """
+    files = collect_dir(d, exclude)
+    if not files:
+        raise SystemExit(f"{d} 里没有 .md 文件（以 _ 或 . 开头的会跳过）。")
+    parts: list[str] = []
+    for i, f in enumerate(files):
+        text = _read_text(f)
+        meta, body = split_front_matter(text)
+        parts.append(text.rstrip() if (i == 0 and meta) else body.strip())
+    return "\n\n---\n\n".join(parts), files
+
+
+
+# --------------------------------------------------------------------------
 # 2. Markdown → HTML
 # --------------------------------------------------------------------------
 
@@ -393,8 +446,14 @@ def build_markdown():
     return md
 
 
-def render_markdown(src: str, md) -> tuple[str, list[dict]]:
-    """返回 (html, toc)。顺便给标题打 id。"""
+def render_markdown(src: str, md, math: list[dict], nonce: str) -> tuple[str, list[dict]]:
+    r"""返回 (html, toc)。顺便给标题打 id。
+
+    标题里可能有公式，而此刻它们还是占位符。锚点用去掉公式的文本来生成
+    （否则 id 会变成 nonce 那串乱码），目录文字则把公式还原成 \( \)，
+    让 MathJax 连侧栏一起渲染。
+    """
+    ph = re.compile(PH_OPEN + re.escape(nonce) + r":(\d+)" + PH_CLOSE)
     tokens = md.parse(src)
     toc: list[dict] = []
     seen: dict = {}
@@ -403,9 +462,10 @@ def render_markdown(src: str, md) -> tuple[str, list[dict]]:
             text = ""
             if i + 1 < len(tokens) and tokens[i + 1].type == "inline":
                 text = re.sub(r"[`*_~]", "", tokens[i + 1].content).strip()
-            anchor = slugify(text, seen)
+            anchor = slugify(ph.sub("", text).strip() or "section", seen)
             tok.attrSet("id", anchor)
-            toc.append({"level": int(tok.tag[1]), "text": text, "id": anchor})
+            toc.append({"level": int(tok.tag[1]), "text": text,
+                        "id": anchor, "ph": ph})
     body = md.renderer.render(tokens, md.options, {})
     return body, toc
 
@@ -1578,15 +1638,10 @@ WATCH_JS = r"""
 # --------------------------------------------------------------------------
 
 def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
-               style: str = "paper", lang: str = "en") -> str:
-    raw = md_path.read_bytes()
-    for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-
+               style: str = "paper", lang: str = "en",
+               text: str | None = None) -> str:
+    if text is None:
+        text = _read_text(md_path)
     meta, text = split_front_matter(text)
 
     # ① 上锁：公式先从原文里抠出来
@@ -1594,11 +1649,12 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 
     # ② Markdown 渲染（此时文中只有占位符，解析器碰不到任何 LaTeX）
     md = build_markdown()
-    body, toc = render_markdown(locked, md)
+    body, toc = render_markdown(locked, md, math, nonce)
 
     # ③ 原样放回
     body = restore_math(body, math, nonce)
-    body, imgs_skipped = inline_assets(body, md_path.parent)
+    body, imgs_skipped = inline_assets(
+        body, md_path if md_path.is_dir() else md_path.parent)
     if imgs_skipped:
         zh = cli_lang() == "zh"
         print(f"提醒：{imgs_skipped} 张图片超出 {IMG_INLINE_BUDGET // 1024 // 1024} MB 内嵌预算，"
@@ -1633,14 +1689,20 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 
     toc_html = ""
     if len(toc) >= 2:
+        def toc_text(h):
+            esc = html.escape(h["text"])
+            return h["ph"].sub(
+                lambda m: r"\(" + html.escape(math[int(m.group(1))]["tex"],
+                                              quote=False) + r"\)", esc)
+
         items = "".join(
             f'<a class="l{h["level"]}" href="#{h["id"]}" data-id="{h["id"]}">'
-            f'{html.escape(h["text"])}</a>'
+            f'{toc_text(h)}</a>'
             for h in toc
         )
         toc_html = f'<nav id="toc" aria-label="{UI[lang]["toc_head"]}"><p class="ttl">{UI[lang]["toc_head"]}</p>{items}</nav>'
 
-    name = html.escape(md_path.name)
+    name = html.escape(md_path.name + "/" if md_path.is_dir() else md_path.name)
 
     style_opts = "".join(
         f'<option value="{k}"{" selected" if k == style else ""}>{v[lang]}</option>'
@@ -1702,7 +1764,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 # --------------------------------------------------------------------------
 
 def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
-          style: str = "paper", lang: str = "en") -> None:
+          style: str = "paper", lang: str = "en", excl: tuple[str, ...] = ()) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -1712,13 +1774,20 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
         def do_GET(self):
             if self.path.startswith("/__stamp"):
                 try:
-                    stamp = str(md_path.stat().st_mtime_ns)
-                except OSError:
+                    if md_path.is_dir():
+                        files = collect_dir(md_path, excl)
+                        stamp = str(max(f.stat().st_mtime_ns for f in files)) \
+                                + f":{len(files)}"   # 增删文件也算变化
+                    else:
+                        stamp = str(md_path.stat().st_mtime_ns)
+                except (OSError, ValueError):
                     stamp = "gone"
                 self._send(stamp.encode(), "text/plain")
                 return
             try:
-                page = build_html(md_path, mathjax_js, watch=True, style=style, lang=lang)
+                text = join_dir(md_path, excl)[0] if md_path.is_dir() else None
+                page = build_html(md_path, mathjax_js, watch=True, style=style,
+                                  lang=lang, text=text)
             except Exception as e:  # 渲染出错也要看得见，而不是白屏
                 page = (f"<pre style='font:14px monospace;padding:2rem;color:#c0392b'>"
                         f"{html.escape(repr(e))}</pre>")
@@ -1843,7 +1912,7 @@ def find_chrome() -> str | None:
     return None
 
 
-def check(md_path: Path, mathjax_js: str) -> int:
+def check(md_path: Path, mathjax_js: str, joined: str | None = None) -> int:
     """稿件体检 + 渲染检查。
 
     两段独立：
@@ -1856,13 +1925,7 @@ def check(md_path: Path, mathjax_js: str) -> int:
     import tempfile
 
     zh = cli_lang() == "zh"
-    raw = md_path.read_bytes()
-    for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
+    text = joined if joined is not None else _read_text(md_path)
     _, math, _ = MathLocker(split_front_matter(text)[1]).run()
 
     problems = 0
@@ -1884,7 +1947,7 @@ def check(md_path: Path, mathjax_js: str) -> int:
               "skipped the render check (static audit done).", file=sys.stderr)
         return 1 if problems else 0
 
-    page = build_html(md_path, mathjax_js, watch=False)
+    page = build_html(md_path, mathjax_js, watch=False, text=joined)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / "check.html"
         tmp.write_text(page, encoding="utf-8")
@@ -1912,11 +1975,12 @@ def check(md_path: Path, mathjax_js: str) -> int:
         return [" ".join(html.unescape(x).split()) for x in
                 re.findall(r'class="mjx-\w+ ' + cls + r'" data-tex="([^"]*)"', out)]
 
+    label = md_path.name + ("/" if md_path.is_dir() else "")
     if zh:
-        print(f"{md_path.name}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
+        print(f"{label}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
         labels = ("排不出来", "不认识的命令")
     else:
-        print(f"{md_path.name}: {total} formulas, {failed} won't render, "
+        print(f"{label}: {total} formulas, {failed} won't render, "
               f"{warned} with unknown commands")
         labels = ("won't render", "unknown command")
     for label, items in zip(labels, (collect("mjx-failed"), collect("mjx-warn"))):
@@ -1932,7 +1996,7 @@ def main() -> int:
         prog="quietmd",
         description="A quiet Markdown reader for documents with math "
                     "/ 安静地读带公式的 Markdown")
-    ap.add_argument("file", help="要看的 .md 文件")
+    ap.add_argument("file", help="a .md file, or a directory of them to read as one")
     ap.add_argument("-w", "--watch", action="store_true", help="实时预览：存盘即刷新")
     ap.add_argument("-o", "--out", help="输出 HTML 路径（不打开浏览器）")
     ap.add_argument("-p", "--port", type=int, default=0, help="--watch 的端口（默认随机）")
@@ -1945,25 +2009,42 @@ def main() -> int:
                          + " (press s in the page to cycle)")
     ap.add_argument("-V", "--version", action="version",
                     version=f"quietmd {__version__}")
+    ap.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                    help="when reading a directory, skip files matching this "
+                         "(repeatable, e.g. --exclude 'full_*.md')")
     ap.add_argument("--lang", default="en", choices=["en", "zh"],
                     help="initial interface language (a button in the page switches it)")
     args = ap.parse_args()
 
     md_path = Path(args.file).expanduser().resolve()
-    if not md_path.is_file():
-        print(f"找不到文件：{md_path}", file=sys.stderr)
+    if not md_path.exists():
+        print(f"找不到：{md_path}" if cli_lang() == "zh" else f"Not found: {md_path}",
+              file=sys.stderr)
         return 1
+
+    joined: str | None = None
+    if md_path.is_dir():
+        joined, files = join_dir(md_path, tuple(args.exclude))
+        zh = cli_lang() == "zh"
+        # 把接了哪些文件列全 —— 目录里混进产物或旁注是常事，
+        # 只有看得见清单才发现得了（比如一份合并稿把全书又算了一遍）
+        head = f"{md_path.name}/：按文件名接了 {len(files)} 份" if zh else \
+               f"{md_path.name}/: joined {len(files)} files in name order"
+        print(head, file=sys.stderr)
+        for f in files:
+            print(f"  {f.name}", file=sys.stderr)
     mathjax_js = ensure_mathjax().read_text(encoding="utf-8")
 
     if args.check:
-        return check(md_path, mathjax_js)
+        return check(md_path, mathjax_js, joined)
 
     if args.watch:
         serve(md_path, mathjax_js, args.port, open_browser=not args.no_open,
-              style=args.style, lang=args.lang)
+              style=args.style, lang=args.lang, excl=tuple(args.exclude))
         return 0
 
-    page = build_html(md_path, mathjax_js, watch=False, style=args.style, lang=args.lang)
+    page = build_html(md_path, mathjax_js, watch=False, style=args.style,
+                      lang=args.lang, text=joined)
     if args.out:
         out = Path(args.out).expanduser().resolve()
     else:

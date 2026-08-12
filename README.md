@@ -76,6 +76,24 @@ A `\eqref` pointing at a label that doesn't exist renders as `???` and is easy t
 past; a label written twice silently breaks the numbering from there on.
 
 
+## A directory as one book
+
+A run of numbered files usually *is* one thing — chapters of a book, sections of a paper.
+Point quietmd at the directory:
+
+```console
+$ quietmd drafts/
+drafts/: joined 8 files in name order
+  chapter_01_the_symptom.md
+  ...
+```
+
+Files are joined in filename order (`chapter_01…08` is named that way for a reason) and
+the sidebar becomes the structure of the whole book. Files beginning with `_` or `.` are
+skipped — those are usually notes to the author rather than the text. Use
+`--exclude 'full_*.md'` to skip anything else; the file list is always printed, because
+a directory that also holds a generated merge would otherwise count everything twice.
+
 ## Styles
 
 Eight, all embedded in the page — pick from the dropdown or press `s`. Each is modelled on
