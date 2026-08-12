@@ -117,6 +117,19 @@ skipped — those are usually notes to the author rather than the text. Use
 `--exclude 'full_*.md'` to skip anything else; the file list is always printed, because
 a directory that also holds a generated merge would otherwise count everything twice.
 
+## Comparing two drafts
+
+```console
+$ quietmd new.md --diff old.md
+```
+
+**Formulas are compared whole, not character by character.** A character-level diff
+shreds a long equation into red and green confetti; what you actually want to know is
+which formulas changed. Two formulas that differ only in whitespace are *not* a change —
+maths ignores spaces, so `\langle u, v\rangle` and `\langle u,  v \rangle` set
+identically. Changing `u_i` to `v_i` is. The header counts both, so you can see at a
+glance how much of a revision touched the mathematics.
+
 ## Straight to PDF
 
 ```console

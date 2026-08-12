@@ -560,6 +560,111 @@ def link_body_toc(body: str, toc: list[dict]) -> str:
     return body
 
 
+
+# --------------------------------------------------------------------------
+# 2b. 版本对比
+#
+# 改稿时真正想知道的是「哪些公式变了」。按字符做 diff 会把一条长公式拆成碎片，
+# 满屏红绿点，读不出所以然。所以这里把每条公式当成一个整体：
+# 内容一样就是没变，内容不一样就整条算改过，新旧都渲染出来摆在一起。
+#
+# 做法是把公式换成「按内容算出来的指纹」，两个版本里同一条公式因此得到
+# 同一个占位符，行级 diff 就能正确地看出哪几行动了。
+# --------------------------------------------------------------------------
+
+def norm_tex(tex: str) -> str:
+    r"""把公式规范成「渲染等价就相等」的形式。
+
+    数学模式下空格是被忽略的，`\langle u, v\rangle` 和 `\langle u,  v \rangle`
+    排出来一模一样 —— 改稿时不该报成一处改动。唯一不能删的是把两个字母粘起来的
+    那种空格（`\alpha x` 变成 `\alphax` 就成了另一个命令）。
+    公式里出现 \text 之类时空格是有意义的，那就只折叠不删除。
+    """
+    t = re.sub(r"\s+", " ", tex).strip()
+    if re.search(r"\\(text|mbox|textrm|textit|textbf|texttt|operatorname)\b", t):
+        return t
+    return re.sub(r"(?<=[^a-zA-Z]) | (?=[^a-zA-Z])", "", t)
+
+
+def lock_by_content(text: str) -> tuple[str, dict]:
+    import hashlib
+    locked, math, nonce = MathLocker(text).run()
+    pat = re.compile(PH_OPEN + re.escape(nonce) + r":(\d+)" + PH_CLOSE)
+    table: dict = {}
+
+    def sub(m):
+        item = math[int(m.group(1))]
+        key = hashlib.sha1(norm_tex(item["tex"]).encode()).hexdigest()[:12]
+        table[key] = item
+        return f"{PH_OPEN}{key}{PH_CLOSE}"
+
+    return pat.sub(sub, locked), table
+
+
+def render_diff(old_path: Path, new_path: Path, mathjax_js: str,
+                style: str, lang: str) -> str:
+    import difflib
+
+    old_txt = split_front_matter(_read_text(old_path))[1]
+    new_txt = split_front_matter(_read_text(new_path))[1]
+    old_locked, t_old = lock_by_content(old_txt)
+    new_locked, t_new = lock_by_content(new_txt)
+    table = {**t_old, **t_new}
+
+    a, b = old_locked.split("\n"), new_locked.split("\n")
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+
+    md = build_markdown()
+    key_re = re.compile(PH_OPEN + r"([0-9a-f]{12})" + PH_CLOSE)
+
+    def render(lines: list[str], cls: str) -> str:
+        chunk = "\n".join(lines).strip("\n")
+        if not chunk.strip():
+            return ""
+        body, _ = render_markdown(chunk, md, [], "\x00nomatch\x00")
+
+        def put(m):
+            item = table.get(m.group(1))
+            if not item:
+                return ""
+            tex = html.escape(item["tex"], quote=False)
+            src = html.escape(item["tex"], quote=True)
+            if item["kind"] == "inline":
+                return f'<span class="mjx-inline" data-tex="{src}">\\({tex}\\)</span>'
+            if item["kind"] == "display":
+                return f'<span class="mjx-block" data-tex="{src}">\\[{tex}\\]</span>'
+            return f'<span class="mjx-block" data-tex="{src}">{tex}</span>'
+
+        return f'<div class="{cls}">{key_re.sub(put, body)}</div>'
+
+    parts, n_chg, n_math = [], 0, 0
+
+    def math_keys(lines):
+        return set(key_re.findall("\n".join(lines)))
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts.append(render(b[j1:j2], "d-eq"))
+            continue
+        n_chg += 1
+        if math_keys(a[i1:i2]) ^ math_keys(b[j1:j2]):
+            n_math += 1
+        if tag in ("replace", "delete"):
+            parts.append(render(a[i1:i2], "d-del"))
+        if tag in ("replace", "insert"):
+            parts.append(render(b[j1:j2], "d-add"))
+
+    head = (f'<div class="d-head"><b>{new_path.name}</b> vs '
+            f'<span class="old">{old_path.name}</span>'
+            f'<span class="n">{n_chg}</span>'
+            f'<span class="n-label">{UI[lang]["diff_changes"]}</span>'
+            f'<span class="n">{n_math}</span>'
+            f'<span class="n-label">{UI[lang]["diff_math"]}</span></div>')
+
+    return build_html(new_path, mathjax_js, style=style, lang=lang,
+                      prebuilt=head + "".join(parts))
+
+
 def restore_math(body: str, math: list[dict], nonce: str) -> str:
     """把占位符换回公式。统一输出成 \\( \\) / \\[ \\] / 裸环境 三种形式，
     MathJax 只需认这三种，$ 完全不参与扫描 —— 所以 $100 永远不会被误渲染。"""
@@ -885,6 +990,32 @@ pre.highlight{background:var(--code-bg)}
 .doc-toc .toc-l2{padding-left:2.8em; font-size:.9em; color:var(--fg-dim)}
 .doc-toc .toc-l3{padding-left:4.2em; font-size:.88em; color:var(--fg-dim)}
 
+/* ---------- 版本对比 ---------- */
+.d-head{
+  display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
+  font-family:var(--sans); font-size:12.5px; color:var(--fg-dim);
+  padding-bottom:.9rem; margin-bottom:1.8rem; border-bottom:1px solid var(--rule);
+}
+.d-head b{color:var(--fg); font-weight:600}
+.d-head .old{text-decoration:line-through; opacity:.7}
+.d-head .n{margin-left:.6rem; color:var(--fg); font-weight:600;
+  font-variant-numeric:tabular-nums}
+.d-head .n-label{margin-left:-.25rem}
+/* 改动的段落靠左边一条竖线标出来，底色很淡 —— 满屏红绿会盖过内容本身 */
+.d-del, .d-add{padding:.1em 0 .1em 1rem; margin:.5em 0; border-left:3px solid}
+.d-del{border-left-color:#c0392b; background:rgba(192,57,43,.055)}
+.d-add{border-left-color:#2e7d4f; background:rgba(46,125,79,.055)}
+.d-del{opacity:.72}
+.d-del > :first-child, .d-add > :first-child{margin-top:0}
+.d-del > :last-child, .d-add > :last-child{margin-bottom:0}
+@media (prefers-color-scheme: dark){
+  html:not([data-theme="light"]) .d-del{background:rgba(255,120,100,.075)}
+  html:not([data-theme="light"]) .d-add{background:rgba(110,220,160,.075)}
+}
+html[data-theme="dark"] .d-del{background:rgba(255,120,100,.075)}
+html[data-theme="dark"] .d-add{background:rgba(110,220,160,.075)}
+@media print{ .d-del{opacity:1} }
+
 /* 脚注 */
 .footnotes{margin-top:3.5em; padding-top:1.2em; border-top:1px solid var(--rule);
   font-size:.88em; color:var(--fg-dim)}
@@ -1060,6 +1191,7 @@ UI = {
         "find_h": "heading", "find_t": "text", "find_m": "formula",
         "find_none": "Nothing found.",
         "resumed": "Picked up where you left off · ",
+        "diff_changes": "changes", "diff_math": "involving formulas",
         "console_dead": "[quietmd] these formulas won't render:",
         "console_warn": "[quietmd] these formulas contain unknown commands:",
     },
@@ -1082,6 +1214,7 @@ UI = {
         "find_h": "标题", "find_t": "正文", "find_m": "公式",
         "find_none": "没找到。",
         "resumed": "接着上次读到的地方 · ",
+        "diff_changes": "处改动", "diff_math": "处涉及公式",
         "console_dead": "[quietmd] 这些公式排不出来：",
         "console_warn": "[quietmd] 这些公式里有不认识的命令：",
     },
@@ -2023,21 +2156,27 @@ WATCH_JS = r"""
 
 def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
                style: str = "paper", lang: str = "en",
-               text: str | None = None) -> str:
-    if text is None:
-        text = _read_text(md_path)
-    meta, text = split_front_matter(text)
+               text: str | None = None, prebuilt: str | None = None) -> str:
+    if prebuilt is not None:
+        # diff 视图：正文已经拼好了，跳过 Markdown 那一整套
+        meta, text, toc = {}, "", []
+        math: list[dict] = []
+        body = prebuilt
+    else:
+        if text is None:
+            text = _read_text(md_path)
+        meta, text = split_front_matter(text)
 
-    # ① 上锁：公式先从原文里抠出来
-    locked, math, nonce = MathLocker(text).run()
+        # ① 上锁：公式先从原文里抠出来
+        locked, math, nonce = MathLocker(text).run()
 
-    # ② Markdown 渲染（此时文中只有占位符，解析器碰不到任何 LaTeX）
-    md = build_markdown()
-    body, toc = render_markdown(locked, md, math, nonce)
+        # ② Markdown 渲染（此时文中只有占位符，解析器碰不到任何 LaTeX）
+        md = build_markdown()
+        body, toc = render_markdown(locked, md, math, nonce)
 
-    # ③ 原样放回
-    body = restore_math(body, math, nonce)
-    body = link_body_toc(body, toc)
+        # ③ 原样放回
+        body = restore_math(body, math, nonce)
+        body = link_body_toc(body, toc)
     body, imgs_skipped = inline_assets(
         body, md_path if md_path.is_dir() else md_path.parent)
     if imgs_skipped:
@@ -2535,6 +2674,9 @@ def main() -> int:
                          + " (press s in the page to cycle)")
     ap.add_argument("-V", "--version", action="version",
                     version=f"quietmd {__version__}")
+    ap.add_argument("--diff", metavar="OLD",
+                    help="compare against an earlier version of the same document; "
+                         "formulas are compared whole, not character by character")
     ap.add_argument("--pdf", nargs="?", const="", metavar="OUT",
                     help="lay it out as a PDF instead of opening a browser "
                          "(the style you pick is the page design)")
@@ -2563,6 +2705,21 @@ def main() -> int:
         for f in files:
             print(f"  {f.name}", file=sys.stderr)
     mathjax_js = ensure_mathjax().read_text(encoding="utf-8")
+
+    if args.diff:
+        old = Path(args.diff).expanduser().resolve()
+        if not old.is_file():
+            print(f"找不到：{old}" if cli_lang() == "zh" else f"Not found: {old}",
+                  file=sys.stderr)
+            return 1
+        page = render_diff(old, md_path, mathjax_js, args.style, args.lang)
+        out = Path(args.out).expanduser().resolve() if args.out else \
+            md_path.with_name(md_path.stem + ".diff.html")
+        out.write_text(page, encoding="utf-8")
+        print(f"{out}  ({out.stat().st_size/1024/1024:.1f} MB)")
+        if not args.out and not args.no_open:
+            webbrowser.open(out.as_uri())
+        return 0
 
     if args.check:
         return check(md_path, mathjax_js, joined)
