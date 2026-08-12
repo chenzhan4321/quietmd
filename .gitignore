@@ -1,0 +1,7 @@
+# MathJax 由程序首次运行时自行下载（2.2 MB，不进版本库）
+tex-svg-full.js
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

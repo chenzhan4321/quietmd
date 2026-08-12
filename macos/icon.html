@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  *{margin:0;padding:0}
+  html,body{width:1024px;height:1024px;background:transparent;overflow:hidden}
+  svg{display:block}
+</style></head>
+<body>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0"    stop-color="#fffdf9"/>
+      <stop offset="0.6"  stop-color="#f8f4ec"/>
+      <stop offset="1"    stop-color="#eee8db"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="76" y="76" width="872" height="872" rx="196" ry="196"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#card)">
+    <rect x="76" y="76" width="872" height="872" fill="url(#paper)"/>
+
+    <!-- 求和号：主体，居中偏上，给下面的文本行留出呼吸 -->
+    <text x="512" y="600" text-anchor="middle"
+          font-family="'Times New Roman', 'STIXGeneral', Georgia, serif"
+          font-size="470" fill="#1f1d1a">&#8721;</text>
+
+    <!-- 段落：两条文本行，第二行短，暗示这是一页文档而不只是一个符号 -->
+    <g fill="#cdc4b1">
+      <rect x="330" y="742" width="364" height="26" rx="13"/>
+      <rect x="330" y="806" width="232" height="26" rx="13"/>
+    </g>
+    <!-- 靛蓝强调段：呼应阅读器里的进度条与目录高亮 -->
+    <rect x="330" y="742" width="120" height="26" rx="13" fill="#2f5d9e"/>
+  </g>
+
+  <!-- 极淡的内描边，浅色背景下也有边界 -->
+  <rect x="77.5" y="77.5" width="869" height="869" rx="195" ry="195"
+        fill="none" stroke="#1f1d1a" stroke-opacity="0.09" stroke-width="3"/>
+</svg>
+</body></html>

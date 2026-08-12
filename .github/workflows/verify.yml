@@ -1,0 +1,34 @@
+name: verify
+
+# 这个项目的卖点就是"结论可以自己复算"，所以 CI 跑的就是给用户的那个自检脚本。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Run the self-check
+        run: bash verify.sh
+
+      - name: --check should flag exactly the deliberately broken formula
+        run: |
+          set +e
+          uv run --quiet --script quietmd.py tests/math_torture.md --check
+          code=$?
+          set -e
+          # 退出码 1 = 发现了问题公式，这正是预期：测试文档里有一条故意写坏的
+          [ "$code" -eq 1 ] || { echo "expected exit 1, got $code"; exit 1; }

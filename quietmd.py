@@ -1,0 +1,1543 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "markdown-it-py>=3.0",
+#   "mdit-py-plugins>=0.4",
+#   "linkify-it-py>=2.0",
+#   "Pygments>=2.17",
+#   "PyYAML>=6.0",
+# ]
+# ///
+"""
+quietmd — 一个把数学公式放在第一位的 Markdown 阅读器。
+
+核心设计（也是 Typora / iA Writer 出问题的地方）：
+    Markdown 解析器永远不应该看到公式的内容。
+    很多编辑器是「先跑 Markdown，再拿结果喂给 KaTeX」，于是
+    $a_i$ 里的 _i_ 被当成斜体、\\\\ 被吞、\\begin{align} 被当普通文字。
+    这里反过来做：先扫描原文，把每一段数学抠出来上锁（换成占位符），
+    渲染完 Markdown 再原样放回去交给 MathJax。公式一个字符都不会被动过。
+
+用法：
+    quietmd file.md              渲染并在浏览器打开（生成自包含单文件 HTML）
+    quietmd file.md -w           实时预览：存盘即刷新（本地服务，Ctrl-C 退出）
+    quietmd file.md -o out.html  只生成文件，不打开
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import html
+import json
+import mimetypes
+import os
+import re
+import sys
+import unicodedata
+import webbrowser
+from pathlib import Path
+
+# --------------------------------------------------------------------------
+# 0. 常量
+# --------------------------------------------------------------------------
+
+HERE = Path(__file__).resolve().parent
+MATHJAX_PATH = HERE / "tex-svg-full.js"
+CACHE_DIR = Path.home() / ".cache" / "quietmd"
+
+# MathJax 3 的 SVG 全量包。选 SVG 而不是 CHTML 是因为它不依赖外部字体文件，
+# 一个 js 就能自给自足，页面才能真正做到单文件离线。
+MATHJAX_VERSION = "3.2.2"
+MATHJAX_URLS = [
+    f"https://cdn.jsdelivr.net/npm/mathjax@{MATHJAX_VERSION}/es5/tex-svg-full.js",
+    f"https://unpkg.com/mathjax@{MATHJAX_VERSION}/es5/tex-svg-full.js",
+    f"https://ghfast.top/https://raw.githubusercontent.com/mathjax/MathJax/"
+    f"{MATHJAX_VERSION}/es5/tex-svg-full.js",
+]
+MATHJAX_MIN_BYTES = 1_500_000   # 完整包 2.2 MB；低于这个数说明拿到的是错误页
+
+
+def ensure_mathjax() -> Path:
+    """首次运行时把 MathJax 抓下来存到本地，之后一直离线用。
+
+    仓库里不放这个 2.2 MB 的文件，所以 clone 下来第一次跑会下载一次。
+    多个镜像轮着试，并且按大小校验 —— 否则拿到一个 404 页面存成 js，
+    后面会以「所有公式都渲染不出来」的形式发作，很难查。
+    """
+    if MATHJAX_PATH.is_file() and MATHJAX_PATH.stat().st_size >= MATHJAX_MIN_BYTES:
+        return MATHJAX_PATH
+
+    import urllib.request
+    print(f"首次运行：下载 MathJax {MATHJAX_VERSION}（约 2.2 MB，只需一次）…",
+          file=sys.stderr)
+    MATHJAX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for url in MATHJAX_URLS:
+        try:
+            with urllib.request.urlopen(url, timeout=90) as r:
+                data = r.read()
+        except Exception as e:
+            print(f"  {url.split('/')[2]} 失败：{e}", file=sys.stderr)
+            continue
+        if len(data) < MATHJAX_MIN_BYTES:
+            print(f"  {url.split('/')[2]} 返回的内容太小（{len(data)} 字节），跳过",
+                  file=sys.stderr)
+            continue
+        MATHJAX_PATH.write_bytes(data)
+        print(f"  已存到 {MATHJAX_PATH}（{len(data)/1024/1024:.1f} MB）", file=sys.stderr)
+        return MATHJAX_PATH
+
+    raise SystemExit(
+        "下载 MathJax 失败。可以手动放一份到：\n"
+        f"  {MATHJAX_PATH}\n"
+        f"来源：{MATHJAX_URLS[0]}"
+    )
+
+# 占位符用 Unicode 私用区字符：CommonMark 不会转义、不会拆分它们
+PH_OPEN, PH_CLOSE = "\ue000", "\ue001"
+
+# 可以裸写（不包在 $$ 里）的 LaTeX 环境。MathJax 的 processEnvironments 认这些。
+MATH_ENVS = (
+    "equation|align|gather|multline|flalign|alignat|eqnarray|subequations|"
+    "displaymath|math|CD|empheq|IEEEeqnarray|split|aligned|gathered|alignedat|"
+    "cases|dcases|rcases|array|matrix|pmatrix|bmatrix|vmatrix|Bmatrix|Vmatrix|"
+    "smallmatrix|tikzcd"
+)
+ENV_RE = re.compile(r"\\begin\{(" + MATH_ENVS + r")(\*?)\}")
+
+IMG_INLINE_BUDGET = 24 * 1024 * 1024  # 图片 base64 内嵌总预算
+
+
+# --------------------------------------------------------------------------
+# 1. 数学保护扫描器
+# --------------------------------------------------------------------------
+
+class MathLocker:
+    """线性扫描原文，把数学片段换成占位符，同时**跳过**代码区域。
+
+    跳过而不是提取代码，是因为代码块本身还要交给 Markdown 正常渲染；
+    我们只是不在里面找公式（免得 `echo $PATH` 变成公式）。
+    """
+
+    def __init__(self, text: str):
+        self.s = text
+        self.n = len(text)
+        self.i = 0
+        self.out: list[str] = []
+        self.math: list[dict] = []
+
+    # -- 工具 ------------------------------------------------------------
+    def _at_line_start(self) -> bool:
+        return self.i == 0 or self.s[self.i - 1] == "\n"
+
+    def _emit(self, chunk: str) -> None:
+        self.out.append(chunk)
+
+    def _lock(self, tex: str, kind: str) -> None:
+        """kind: 'inline' | 'display' | 'env'"""
+        idx = len(self.math)
+        self.math.append({"tex": tex, "kind": kind})
+        self.out.append(f"{PH_OPEN}{idx}{PH_CLOSE}")
+
+    # -- 主循环 ----------------------------------------------------------
+    def run(self) -> tuple[str, list[dict]]:
+        s, n = self.s, self.n
+        while self.i < n:
+            c = s[self.i]
+
+            # (a) 围栏代码块 ``` / ~~~ ：整块原样抄过去
+            if c in "`~" and self._at_line_start() and self._try_fence():
+                continue
+
+            # (b) 行内代码 `...`：原样抄过去
+            if c == "`" and self._try_inline_code():
+                continue
+
+            # (c) 反斜杠开头的东西
+            if c == "\\" and self.i + 1 < n:
+                nxt = s[self.i + 1]
+                if nxt == "[" and self._try_delim("\\[", "\\]", "display"):
+                    continue
+                if nxt == "(" and self._try_delim("\\(", "\\)", "inline"):
+                    continue
+                if nxt == "b" and self._try_env():
+                    continue
+                # 正文里裸写的 \eqref{...} / \ref{...}：MathJax 3 不再扫描定界符
+                # 之外的引用，所以这里把它们也当成行内数学锁起来。
+                if nxt in "er" and self._try_ref():
+                    continue
+                # \$ \\ \_ 之类转义：两个字符一起吐出，别让 $ 被后面误认
+                self._emit(s[self.i:self.i + 2])
+                self.i += 2
+                continue
+
+            # (d) $$ ... $$
+            if c == "$" and s.startswith("$$", self.i) and self._try_dollar_display():
+                continue
+
+            # (e) $ ... $
+            if c == "$" and self._try_dollar_inline():
+                continue
+
+            self._emit(c)
+            self.i += 1
+
+        return "".join(self.out), self.math
+
+    # -- 各个分支 --------------------------------------------------------
+    def _try_fence(self) -> bool:
+        s, n = self.s, self.n
+        m = re.compile(r"( {0,3})(`{3,}|~{3,})").match(s, self.i)
+        if not m:
+            return False
+        marker = m.group(2)
+        # 找闭合围栏
+        pos = s.find("\n", m.end())
+        if pos == -1:
+            self._emit(s[self.i:])
+            self.i = n
+            return True
+        close = re.compile(
+            r"^ {0,3}" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$",
+            re.M,
+        )
+        cm = close.search(s, pos + 1)
+        end = cm.end() if cm else n
+        self._emit(s[self.i:end])
+        self.i = end
+        return True
+
+    def _try_inline_code(self) -> bool:
+        s, n = self.s, self.n
+        j = self.i
+        while j < n and s[j] == "`":
+            j += 1
+        run = j - self.i
+        # 找同长度的闭合反引号串
+        k = j
+        while k < n:
+            if s[k] == "`":
+                k2 = k
+                while k2 < n and s[k2] == "`":
+                    k2 += 1
+                if k2 - k == run:
+                    self._emit(s[self.i:k2])
+                    self.i = k2
+                    return True
+                k = k2
+            else:
+                k += 1
+        return False  # 没闭合，当普通反引号处理
+
+    def _try_delim(self, open_d: str, close_d: str, kind: str) -> bool:
+        s = self.s
+        start = self.i + len(open_d)
+        end = s.find(close_d, start)
+        if end == -1:
+            return False
+        self._lock(s[start:end], kind)
+        self.i = end + len(close_d)
+        return True
+
+    def _try_env(self) -> bool:
+        s = self.s
+        m = ENV_RE.match(s, self.i)
+        if not m:
+            return False
+        env = m.group(1) + m.group(2)
+        # 允许同名环境嵌套（比如 align 里套 aligned），做一次配对计数
+        depth = 0
+        pos = self.i
+        pat = re.compile(r"\\(begin|end)\{" + re.escape(env) + r"\}")
+        while True:
+            mm = pat.search(s, pos)
+            if not mm:
+                return False
+            depth += 1 if mm.group(1) == "begin" else -1
+            pos = mm.end()
+            if depth == 0:
+                break
+        self._lock(s[self.i:pos], "env")
+        self.i = pos
+        return True
+
+    def _try_ref(self) -> bool:
+        m = re.compile(r"\\(eqref|ref)\{([^}\n]{1,120})\}").match(self.s, self.i)
+        if not m:
+            return False
+        self._lock(m.group(0), "inline")
+        self.i = m.end()
+        return True
+
+    def _try_dollar_display(self) -> bool:
+        s = self.s
+        start = self.i + 2
+        end = s.find("$$", start)
+        if end == -1:
+            return False
+        self._lock(s[start:end], "display")
+        self.i = end + 2
+        return True
+
+    def _try_dollar_inline(self) -> bool:
+        """行内 $...$ 的判定规则（沿用 pandoc 的保守做法，避免误吃货币符号）：
+        - 开定界符 $ 后面不能是空白
+        - 闭定界符 $ 前面不能是空白
+        - 闭定界符 $ 后面不能紧跟数字（挡住 "$5 到 $10" 这种）
+        - 内容不能跨空行，长度有上限
+        任一条不满足，就当成一个普通的美元符号。
+        """
+        s, n = self.s, self.n
+        start = self.i + 1
+        if start >= n or s[start] in " \t\n":
+            return False
+        j = start
+        while j < n:
+            ch = s[j]
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == "\n" and j + 1 < n and s[j + 1] == "\n":
+                return False
+            if j - start > 1200:
+                return False
+            if ch == "$":
+                if s[j - 1] in " \t\n":
+                    return False
+                if j + 1 < n and s[j + 1].isdigit():
+                    return False
+                self._lock(s[start:j], "inline")
+                self.i = j + 1
+                return True
+            j += 1
+        return False
+
+
+# --------------------------------------------------------------------------
+# 2. Markdown → HTML
+# --------------------------------------------------------------------------
+
+def slugify(text: str, seen: dict) -> str:
+    t = unicodedata.normalize("NFKC", text).strip().lower()
+    t = re.sub(r"[^\w\u4e00-\u9fff\u3040-\u30ff\-\s]", "", t)
+    t = re.sub(r"\s+", "-", t).strip("-") or "section"
+    if t in seen:
+        seen[t] += 1
+        t = f"{t}-{seen[t]}"
+    else:
+        seen[t] = 0
+    return t
+
+
+def build_markdown():
+    from markdown_it import MarkdownIt
+    from mdit_py_plugins.deflist import deflist_plugin
+    from mdit_py_plugins.footnote import footnote_plugin
+    from mdit_py_plugins.tasklists import tasklists_plugin
+    from pygments import highlight as pyg_highlight
+    from pygments.formatters import HtmlFormatter
+    from pygments.lexers import get_lexer_by_name, guess_lexer
+
+    def hl(code: str, lang: str, attrs):
+        try:
+            lexer = get_lexer_by_name(lang) if lang else guess_lexer(code)
+        except Exception:
+            return ""  # 交回 markdown-it 走默认转义路径
+        # nowrap=True 只要高亮过的内容，外层 <pre> 由我们自己写。
+        # 用 pygments 默认的 <div class="highlight"><pre> 会被 markdown-it
+        # 再包一层 <pre><code>，代码块就套成了两层框。
+        inner = pyg_highlight(code, lexer, HtmlFormatter(nowrap=True))
+        return f'<pre class="highlight"><code>{inner}</code></pre>'
+
+    md = (
+        MarkdownIt("gfm-like", {"html": True, "linkify": True, "typographer": False,
+                                "highlight": hl})
+        .use(footnote_plugin)
+        .use(deflist_plugin)
+        .use(tasklists_plugin, enabled=True)
+    )
+    return md
+
+
+def render_markdown(src: str, md) -> tuple[str, list[dict]]:
+    """返回 (html, toc)。顺便给标题打 id。"""
+    tokens = md.parse(src)
+    toc: list[dict] = []
+    seen: dict = {}
+    for i, tok in enumerate(tokens):
+        if tok.type == "heading_open" and tok.tag in ("h1", "h2", "h3", "h4"):
+            text = ""
+            if i + 1 < len(tokens) and tokens[i + 1].type == "inline":
+                text = re.sub(r"[`*_~]", "", tokens[i + 1].content).strip()
+            anchor = slugify(text, seen)
+            tok.attrSet("id", anchor)
+            toc.append({"level": int(tok.tag[1]), "text": text, "id": anchor})
+    body = md.renderer.render(tokens, md.options, {})
+    return body, toc
+
+
+def restore_math(body: str, math: list[dict]) -> str:
+    """把占位符换回公式。统一输出成 \\( \\) / \\[ \\] / 裸环境 三种形式，
+    MathJax 只需认这三种，$ 完全不参与扫描 —— 所以 $100 永远不会被误渲染。"""
+    pat = re.compile(PH_OPEN + r"(\d+)" + PH_CLOSE)
+
+    def sub(m):
+        item = math[int(m.group(1))]
+        tex = html.escape(item["tex"], quote=False)
+        src = html.escape(item["tex"], quote=True)  # 供双击复制的 LaTeX 源码
+        if item["kind"] == "inline":
+            return f'<span class="mjx-inline" data-tex="{src}">\\({tex}\\)</span>'
+        if item["kind"] == "display":
+            return f'<span class="mjx-block" data-tex="{src}">\\[{tex}\\]</span>'
+        return f'<span class="mjx-block" data-tex="{src}">{tex}</span>'
+
+    return pat.sub(sub, body)
+
+
+# --------------------------------------------------------------------------
+# 3. 资源内嵌（图片 / 相对链接）
+# --------------------------------------------------------------------------
+
+def inline_assets(body: str, base_dir: Path) -> str:
+    budget = [IMG_INLINE_BUDGET]
+
+    def fix_src(m):
+        pre, url, post = m.group(1), m.group(2), m.group(3)
+        if re.match(r"^(https?:|data:|#|mailto:|file:)", url):
+            return m.group(0)
+        p = (base_dir / url.split("#")[0].split("?")[0]).resolve()
+        if not p.is_file():
+            return m.group(0)
+        data = p.read_bytes()
+        if len(data) <= budget[0]:
+            budget[0] -= len(data)
+            mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+            b64 = base64.b64encode(data).decode()
+            return f'{pre}data:{mime};base64,{b64}{post}'
+        return f'{pre}file://{p}{post}'
+
+    body = re.sub(r'(<img[^>]*\ssrc=")([^"]+)(")', fix_src, body)
+
+    def fix_href(m):
+        pre, url, post = m.group(1), m.group(2), m.group(3)
+        if re.match(r"^(https?:|data:|#|mailto:|file:)", url):
+            return m.group(0)
+        p = (base_dir / url).resolve()
+        return f'{pre}file://{p}{post}' if p.exists() else m.group(0)
+
+    return re.sub(r'(<a[^>]*\shref=")([^"]+)(")', fix_href, body)
+
+
+# --------------------------------------------------------------------------
+# 4. Front matter
+# --------------------------------------------------------------------------
+
+def split_front_matter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---"):
+        return {}, text
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.S)
+    if not m:
+        return {}, text
+    try:
+        import yaml
+        meta = yaml.safe_load(m.group(1)) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
+    return meta, text[m.end():]
+
+
+# --------------------------------------------------------------------------
+# 5. 样式
+# --------------------------------------------------------------------------
+
+def pygments_css() -> str:
+    from pygments.formatters import HtmlFormatter
+    light = HtmlFormatter(style="friendly", cssclass="highlight").get_style_defs(".highlight")
+    try:
+        dark_style = "github-dark"
+        HtmlFormatter(style=dark_style)
+    except Exception:
+        dark_style = "monokai"
+    dark = HtmlFormatter(style=dark_style, cssclass="highlight").get_style_defs(".highlight")
+    dark_media = "\n".join(
+        "  " + ln for ln in dark.splitlines()
+    )
+    return f"""
+{light}
+@media (prefers-color-scheme: dark) {{
+  html:not([data-theme="light"]) {{
+{dark_media}
+  }}
+}}
+html[data-theme="dark"] {{
+{dark_media}
+}}
+/* 必须放在 pygments 样式之后才能覆盖它：中文注释被拉成伪斜体很难看 */
+.highlight .c,.highlight .c1,.highlight .cm,.highlight .cp,.highlight .cs,
+.highlight .ch,.highlight .cpf,.highlight .sd{{font-style:normal}}
+"""
+
+
+CSS = r"""
+:root{
+  --bg:#fbfaf7; --bg-soft:#f3f1ec; --fg:#1f1d1a; --fg-dim:#6b665e;
+  --rule:#e2ddd3; --accent:#2f5d9e; --accent-soft:#e8eef7;
+  --mark:#fdf3c8; --code-bg:#f5f3ee; --err:#c0392b; --err-bg:#c0392b;
+  --fs:18px; --measure:44rem;
+  --serif:"Iowan Old Style","Charter","Palatino","Palatino Linotype",Georgia,"Songti SC","Source Han Serif SC",serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  --mono:"SF Mono","JetBrains Mono","Menlo","Consolas",monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark){
+  html:not([data-theme="light"]){
+    --bg:#15161a; --bg-soft:#1d1f24; --fg:#e2e0da; --fg-dim:#918d86;
+    --rule:#2c2f36; --accent:#8aa9e6; --accent-soft:#1e2634;
+    --mark:#4a4321; --code-bg:#1c1e23; --err:#ff7b6b; --err-bg:#8c2f22;
+  }
+}
+html[data-theme="dark"]{
+  --bg:#15161a; --bg-soft:#1d1f24; --fg:#e2e0da; --fg-dim:#918d86;
+  --rule:#2c2f36; --accent:#8aa9e6; --accent-soft:#1e2634;
+  --mark:#4a4321; --code-bg:#1c1e23; --err:#ff7b6b; --err-bg:#8c2f22;
+}
+
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--serif); font-size:var(--fs); line-height:1.72;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  font-variant-numeric:oldstyle-nums proportional-nums;
+}
+
+/* ---------- 顶栏 ---------- */
+#bar{
+  position:fixed; top:0; left:0; right:0; height:44px; z-index:50;
+  display:flex; align-items:center; gap:.5rem; padding:0 .9rem;
+  background:color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter:saturate(180%) blur(14px);
+  border-bottom:1px solid var(--rule); font-family:var(--sans); font-size:13px;
+}
+#bar .name{color:var(--fg-dim); font-weight:500; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; flex:0 1 auto}
+#bar .sp{flex:1}
+#bar button{
+  font:inherit; color:var(--fg-dim); background:transparent; cursor:pointer;
+  border:1px solid transparent; border-radius:7px; padding:.25rem .55rem; line-height:1;
+}
+#bar button:hover{background:var(--bg-soft); color:var(--fg)}
+#bar button.on{color:var(--accent); background:var(--accent-soft)}
+/* 下拉框：去掉原生外观，自己画箭头，这样在明暗两套配色下都对得上 */
+#bar .sel{position:relative; display:inline-flex; align-items:center}
+#bar .sel::after{
+  content:"▾"; position:absolute; right:.5rem; font-size:10px;
+  color:var(--fg-dim); pointer-events:none;
+}
+#bar select{
+  font:inherit; font-size:12.5px; color:var(--fg-dim); line-height:1;
+  background:transparent; border:1px solid var(--rule); border-radius:7px;
+  padding:.24rem 1.45rem .24rem .55rem; cursor:pointer;
+  -webkit-appearance:none; appearance:none;
+}
+#bar select:hover{color:var(--fg); background:var(--bg-soft)}
+#bar select:focus{outline:2px solid var(--accent-soft); outline-offset:1px}
+#bar select option{color:#111; background:#fff}   /* 原生弹层始终用浅色，保证可读 */
+@media (max-width:820px){ #bar .hide-sm{display:none} }
+#prog{position:fixed;top:0;left:0;height:2px;background:var(--accent);z-index:60;width:0}
+
+/* ---------- 布局 ---------- */
+#wrap{display:flex; align-items:flex-start; padding-top:44px}
+#toc{
+  position:sticky; top:44px; flex:0 0 250px; max-height:calc(100vh - 44px);
+  overflow-y:auto; padding:1.6rem .8rem 3rem 1.2rem;
+  font-family:var(--sans); font-size:12.5px; line-height:1.5;
+}
+#toc a{display:block; color:var(--fg-dim); text-decoration:none;
+  padding:.24rem .5rem; border-left:2px solid transparent; border-radius:0 5px 5px 0;}
+#toc a:hover{color:var(--fg); background:var(--bg-soft)}
+#toc a.on{color:var(--accent); border-left-color:var(--accent); background:var(--accent-soft)}
+#toc a.l2{padding-left:.5rem}
+#toc a.l3{padding-left:1.4rem; font-size:12px}
+#toc a.l4{padding-left:2.3rem; font-size:11.5px}
+#toc .ttl{font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--fg-dim); opacity:.65; margin:0 0 .5rem .5rem}
+main{flex:1 1 auto; min-width:0; display:flex; justify-content:center; padding:0 2rem 12rem}
+article{width:100%; max-width:var(--measure); padding-top:2.4rem}
+@media (max-width:1000px){ #toc{display:none} main{padding:0 1.2rem 8rem} }
+
+/* 目录收起：任何风格下都能开关，用户的选择记在 localStorage */
+html[data-toc="off"] #toc{display:none}
+
+
+/* ---------- 正文排版 ---------- */
+article h1,article h2,article h3,article h4{
+  font-family:var(--serif); font-weight:600; line-height:1.25;
+  letter-spacing:-.012em; margin:2.4em 0 .7em; scroll-margin-top:60px;
+}
+article h1{font-size:2.05em; margin-top:0; letter-spacing:-.02em}
+article h2{font-size:1.5em; padding-bottom:.28em; border-bottom:1px solid var(--rule)}
+article h3{font-size:1.2em}
+article h4{font-size:1.02em; color:var(--fg-dim)}
+article p{margin:0 0 1.15em}
+article a{color:var(--accent); text-decoration:none;
+  border-bottom:1px solid color-mix(in srgb, var(--accent) 35%, transparent)}
+article a:hover{border-bottom-color:var(--accent)}
+article strong{font-weight:650}
+article hr{border:0; border-top:1px solid var(--rule); margin:2.6em 0}
+article ul,article ol{padding-left:1.4em; margin:0 0 1.15em}
+article li{margin:.3em 0}
+article li::marker{color:var(--fg-dim)}
+article blockquote{
+  margin:1.5em 0; padding:.1em 0 .1em 1.2em;
+  border-left:3px solid var(--rule); color:var(--fg-dim); font-style:italic;
+}
+article blockquote p:last-child{margin-bottom:0}
+article img{max-width:100%; height:auto; display:block; margin:1.8em auto;
+  border-radius:5px; box-shadow:0 1px 3px rgba(0,0,0,.10)}
+article mark{background:var(--mark); padding:.05em .18em; border-radius:2px}
+article kbd{font-family:var(--mono); font-size:.82em; background:var(--bg-soft);
+  border:1px solid var(--rule); border-bottom-width:2px; border-radius:4px; padding:.1em .35em}
+
+/* 表格 */
+.tw{overflow-x:auto; margin:1.7em 0}
+article table{border-collapse:collapse; width:100%; font-family:var(--sans);
+  font-size:.85em; line-height:1.5}
+article th,article td{padding:.5em .75em; text-align:left; border-bottom:1px solid var(--rule);
+  vertical-align:top}
+article th{font-weight:600; border-bottom:2px solid var(--rule); white-space:nowrap}
+article tbody tr:hover{background:var(--bg-soft)}
+
+/* 代码 */
+article code{font-family:var(--mono); font-size:.85em; background:var(--code-bg);
+  padding:.14em .34em; border-radius:4px; font-variant-numeric:normal}
+article pre{background:var(--code-bg); border:1px solid var(--rule); border-radius:8px;
+  padding:.95em 1.1em; overflow-x:auto; margin:1.6em 0; line-height:1.55}
+article pre code{background:none; padding:0; font-size:.82em}
+pre.highlight{background:var(--code-bg)}
+
+/* 脚注 */
+.footnotes{margin-top:3.5em; padding-top:1.2em; border-top:1px solid var(--rule);
+  font-size:.88em; color:var(--fg-dim)}
+.footnotes hr{display:none}
+
+/* front matter 标题块 */
+#meta{margin-bottom:3rem; padding-bottom:1.6rem; border-bottom:1px solid var(--rule)}
+#meta .t{font-size:2.2em; font-weight:600; line-height:1.2; letter-spacing:-.02em; margin:0 0 .35em}
+#meta .s{font-family:var(--sans); font-size:.82em; color:var(--fg-dim); margin:.15em 0}
+
+/* ---------- 数学 ---------- */
+.mjx-inline{white-space:nowrap}
+.mjx-block{display:block; margin:1.5em 0; text-align:center;
+  overflow-x:auto; overflow-y:hidden; padding:.2em 0; scrollbar-width:thin}
+/* 超长公式：右缘渐隐，提示「这里还能往右滚」，而不是让它被无声裁掉 */
+.mjx-block.wide{
+  text-align:left; position:relative;
+  -webkit-mask-image:linear-gradient(to right, #000 calc(100% - 3rem), transparent);
+  mask-image:linear-gradient(to right, #000 calc(100% - 3rem), transparent);
+}
+.mjx-block.wide.at-end{-webkit-mask-image:none; mask-image:none}
+mjx-container[display="true"]{margin:0 !important}
+mjx-container{color:var(--fg)}
+mjx-container svg a{color:var(--accent)}
+/* 渲染失败的公式必须显眼——不允许静默出错。
+   .mjx-failed 由 JS 逐条核对后打上：只要槽位里没长出 mjx-container，
+   或者里面有 merror，就算失败。失败时原始 LaTeX 以红色等宽显示。 */
+.mjx-failed{
+  font-family:var(--mono) !important; font-size:.82em; color:var(--err);
+  background:color-mix(in srgb, var(--err) 12%, transparent);
+  outline:1px dashed color-mix(in srgb, var(--err) 55%, transparent);
+  border-radius:4px; padding:.1em .3em; white-space:pre-wrap; text-align:left;
+}
+/* 排出来了、但里面有不认识的命令：公式主体照常显示，只在下面提示一下。
+   比整条标红克制得多，因为这种公式大部分内容仍然是可读的。 */
+.mjx-warn{
+  border-bottom:2px dashed color-mix(in srgb, var(--err) 45%, transparent);
+  padding-bottom:1px;
+}
+[data-mml-node="merror"] rect{fill:color-mix(in srgb,var(--err) 18%,transparent) !important}
+[data-mml-node="merror"] text{fill:var(--err) !important}
+#mjerr{display:none; position:fixed; right:1rem; bottom:1rem; z-index:70;
+  font-family:var(--sans); font-size:12.5px; background:var(--err-bg); color:#fff;
+  padding:.5rem .8rem; border-radius:8px; cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,.28)}
+#mjerr{display:none; align-items:center; gap:.55rem}
+#mjerr[style*="block"]{display:flex !important}
+#mjerr-x{
+  font:inherit; font-size:15px; line-height:1; color:#fff; opacity:.7;
+  background:transparent; border:0; border-radius:5px; cursor:pointer;
+  padding:.1rem .25rem; margin:-.1rem -.3rem -.1rem 0;
+}
+#mjerr-x:hover{opacity:1; background:rgba(255,255,255,.22)}
+#flash{position:fixed; left:50%; bottom:1.6rem; transform:translateX(-50%); z-index:70;
+  font-family:var(--sans); font-size:12.5px; background:var(--fg); color:var(--bg);
+  padding:.4rem .8rem; border-radius:999px; opacity:0; transition:opacity .18s;
+  pointer-events:none}
+
+/* ---------- 打印 ---------- */
+@media print{
+  :root{--bg:#fff;--fg:#000;--fs:11pt}
+  #bar,#toc,#prog,#mjerr{display:none !important}
+  #wrap{padding-top:0} main{padding:0} article{max-width:none}
+  article h1,article h2,article h3{break-after:avoid}
+  article pre,.mjx-block,article table,article img{break-inside:avoid}
+}
+"""
+
+# --------------------------------------------------------------------------
+# 5b. 排版风格
+#
+# 四种风格全部内嵌，页面里可以随时切换（顶栏按钮或按 s），CLI 的 --style
+# 只决定初始值。paper 就是上面那套基础 CSS，不需要额外规则。
+#
+# 每个风格写四块：排版变量、亮色配色、跟随系统的暗色、手动指定的暗色。
+# 这么写是为了让「风格」和「明暗」两个维度互不干扰 —— 换风格不该把暗色弄坏。
+# --------------------------------------------------------------------------
+
+STYLES = {
+    "paper":      "纸张 · 学术衬线",
+    "latex":      "LaTeX · article 外观",
+    "book":       "书籍 · 沉浸连读",
+    "tufte":      "Tufte · 宽白边",
+    "medium":     "Medium · 长文阅读",
+    "github":     "GitHub · README 外观",
+    "swiss":      "瑞士 · 无衬线网格",
+    "manuscript": "稿件 · 双倍行距",
+}
+
+# 页面宽度档位（rem）。顶栏的「宽−/宽+」在这四档之间走；
+# 不设 data-width 时跟随当前风格自带的行宽。改这里要同时改 STYLE_CSS 末尾的规则。
+WIDTHS = {"narrow": 34, "normal": 44, "wide": 56, "full": None}
+
+STYLE_CSS = r"""
+/* ===== book：书籍排版。窄栏、首行缩进、标题居中、隐藏侧栏，用来长时间连读 ===== */
+html[data-style="book"]{
+  --serif:"Iowan Old Style","Palatino","Palatino Linotype","Book Antiqua",Georgia,
+          "Songti SC","Source Han Serif SC",serif;
+  --measure:36rem;
+}
+html[data-style="book"]:not([data-theme="dark"]){
+  --bg:#f7f2e6; --bg-soft:#efe8d7; --fg:#2b2620; --fg-dim:#7d7466;
+  --rule:#ded4bd; --accent:#8a5a2b; --accent-soft:#efe6d3; --code-bg:#efe8d7;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="book"]:not([data-theme="light"]){
+    --bg:#191612; --bg-soft:#221e18; --fg:#e6ded0; --fg-dim:#968c7c;
+    --rule:#332d24; --accent:#d5a25f; --accent-soft:#241f17; --code-bg:#211d17;
+  }
+}
+html[data-style="book"][data-theme="dark"]{
+  --bg:#191612; --bg-soft:#221e18; --fg:#e6ded0; --fg-dim:#968c7c;
+  --rule:#332d24; --accent:#d5a25f; --accent-soft:#241f17; --code-bg:#211d17;
+}
+html[data-style="book"] body{line-height:1.82}
+html[data-style="book"] article{padding-top:3.5rem}
+/* 传统书籍：段落靠首行缩进分隔，而不是靠段间空白 */
+html[data-style="book"] article p{text-indent:2em; margin-bottom:.15em}
+html[data-style="book"] article h1+p,
+html[data-style="book"] article h2+p,
+html[data-style="book"] article h3+p,
+html[data-style="book"] article h4+p,
+html[data-style="book"] article blockquote p,
+html[data-style="book"] article li p{text-indent:0}
+html[data-style="book"] article h1,
+html[data-style="book"] article h2,
+html[data-style="book"] article h3{text-align:center; font-weight:500}
+html[data-style="book"] article h2{border-bottom:0; letter-spacing:.06em; margin:2.8em 0 1.2em}
+html[data-style="book"] article h2::after{
+  content:""; display:block; width:3.5em; height:1px;
+  background:var(--rule); margin:.9em auto 0;
+}
+html[data-style="book"] article blockquote{
+  border-left:0; padding:0 2.2em; font-style:normal; font-size:.95em;
+}
+/* 书籍风格里连扉页信息也该居中，否则标题居中、副题左对齐会打架 */
+html[data-style="book"] #meta{text-align:center; border-bottom:0; padding-bottom:0}
+html[data-style="book"] #meta .t{font-weight:500}
+html[data-style="book"] #meta::after{
+  content:""; display:block; width:5em; height:1px;
+  background:var(--rule); margin:2rem auto 0;
+}
+
+/* ===== swiss：国际主义网格。无衬线、强层级、左对齐、红色强调 ===== */
+html[data-style="swiss"]{
+  --serif:-apple-system,"Helvetica Neue","Inter","PingFang SC","Hiragino Sans GB",sans-serif;
+  --measure:42rem;
+}
+html[data-style="swiss"]:not([data-theme="dark"]){
+  --bg:#ffffff; --bg-soft:#f2f2f2; --fg:#111111; --fg-dim:#6e6e6e;
+  --rule:#dcdcdc; --accent:#d2331f; --accent-soft:#fdeeeb; --code-bg:#f4f4f4;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="swiss"]:not([data-theme="light"]){
+    --bg:#0e0e0f; --bg-soft:#1a1a1c; --fg:#f2f2f2; --fg-dim:#8c8c8c;
+    --rule:#2a2a2c; --accent:#ff5c42; --accent-soft:#2a1512; --code-bg:#191919;
+  }
+}
+html[data-style="swiss"][data-theme="dark"]{
+  --bg:#0e0e0f; --bg-soft:#1a1a1c; --fg:#f2f2f2; --fg-dim:#8c8c8c;
+  --rule:#2a2a2c; --accent:#ff5c42; --accent-soft:#2a1512; --code-bg:#191919;
+}
+html[data-style="swiss"] body{line-height:1.62; font-size:calc(var(--fs) - 1px)}
+html[data-style="swiss"] article h1,
+html[data-style="swiss"] article h2,
+html[data-style="swiss"] article h3,
+html[data-style="swiss"] article h4{
+  font-weight:700; letter-spacing:-.028em; line-height:1.08;
+}
+html[data-style="swiss"] article h1{font-size:2.6em}
+html[data-style="swiss"] article h2{
+  font-size:1.7em; border-bottom:0; border-top:3px solid var(--fg);
+  padding:.55em 0 0; margin-top:3em;
+}
+html[data-style="swiss"] article h3{font-size:1.18em; text-transform:none}
+html[data-style="swiss"] article strong{font-weight:700}
+html[data-style="swiss"] article blockquote{
+  border-left:3px solid var(--accent); font-style:normal; color:var(--fg);
+}
+html[data-style="swiss"] article th{
+  border-bottom:2px solid var(--fg); text-transform:uppercase;
+  letter-spacing:.055em; font-size:.9em;
+}
+html[data-style="swiss"] #toc a.on{border-left-color:var(--accent)}
+
+/* ===== manuscript：稿件。等宽、双倍行距，留出批注空间，适合校对与打印 ===== */
+html[data-style="manuscript"]{
+  --serif:"SF Mono","JetBrains Mono","IBM Plex Mono",Menlo,"PingFang SC",monospace;
+  --sans:"SF Mono","JetBrains Mono",Menlo,"PingFang SC",monospace;
+  --measure:40rem;
+}
+html[data-style="manuscript"]:not([data-theme="dark"]){
+  --bg:#f4f4f1; --bg-soft:#e9e9e4; --fg:#232323; --fg-dim:#77776f;
+  --rule:#d6d6cf; --accent:#3d6b52; --accent-soft:#e6ede8; --code-bg:#e9e9e4;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="manuscript"]:not([data-theme="light"]){
+    --bg:#141514; --bg-soft:#1d1f1d; --fg:#dcdcd6; --fg-dim:#87877f;
+    --rule:#2b2d2b; --accent:#7fbf9a; --accent-soft:#18211b; --code-bg:#1b1d1b;
+  }
+}
+html[data-style="manuscript"][data-theme="dark"]{
+  --bg:#141514; --bg-soft:#1d1f1d; --fg:#dcdcd6; --fg-dim:#87877f;
+  --rule:#2b2d2b; --accent:#7fbf9a; --accent-soft:#18211b; --code-bg:#1b1d1b;
+}
+html[data-style="manuscript"] body{line-height:2.0; font-size:calc(var(--fs) - 2px)}
+html[data-style="manuscript"] article h1,
+html[data-style="manuscript"] article h2,
+html[data-style="manuscript"] article h3,
+html[data-style="manuscript"] article h4{
+  font-weight:600; letter-spacing:0; line-height:1.5;
+}
+html[data-style="manuscript"] article h1{font-size:1.7em}
+html[data-style="manuscript"] article h2{font-size:1.3em}
+html[data-style="manuscript"] article h3{font-size:1.1em}
+html[data-style="manuscript"] article p{margin-bottom:1.6em}
+html[data-style="manuscript"] article code{font-size:1em; background:var(--bg-soft)}
+html[data-style="manuscript"] article strong{font-weight:700}
+
+/* ===== latex：LaTeX article 类的外观。窄栏、两端对齐、首行缩进、标题居中。
+   字体优先找 Latin Modern / CMU（装过 MacTeX 就有），否则退到 Times。
+   数学本来就是 Computer Modern 血统，正文用这套最协调。 ===== */
+html[data-style="latex"]{
+  --serif:"Latin Modern Roman","CMU Serif","Computer Modern Roman","Nimbus Roman No9 L",
+          "Times New Roman",Times,"Songti SC","Source Han Serif SC",serif;
+  --measure:34rem;
+}
+html[data-style="latex"]:not([data-theme="dark"]){
+  --bg:#ffffff; --bg-soft:#f4f4f4; --fg:#000000; --fg-dim:#555555;
+  --rule:#cccccc; --accent:#0000cc; --accent-soft:#eaeaf7; --code-bg:#f4f4f4;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="latex"]:not([data-theme="light"]){
+    --bg:#101010; --bg-soft:#1a1a1a; --fg:#e8e8e8; --fg-dim:#909090;
+    --rule:#2e2e2e; --accent:#8fa8ff; --accent-soft:#1a1e2c; --code-bg:#191919;
+  }
+}
+html[data-style="latex"][data-theme="dark"]{
+  --bg:#101010; --bg-soft:#1a1a1a; --fg:#e8e8e8; --fg-dim:#909090;
+  --rule:#2e2e2e; --accent:#8fa8ff; --accent-soft:#1a1e2c; --code-bg:#191919;
+}
+html[data-style="latex"] body{line-height:1.52}
+html[data-style="latex"] article p{
+  text-indent:1.5em; margin-bottom:0; text-align:justify; hyphens:auto;
+  /* 中文没有词间空格，默认的两端对齐只能靠拉字距来凑，"行 内 ： 设" 会散开。
+     inter-word 限定只在词间空隙上分配，中文段落因此保持正常字距。 */
+  text-justify:inter-word;
+}
+html[data-style="latex"] article h1+p,
+html[data-style="latex"] article h2+p,
+html[data-style="latex"] article h3+p,
+html[data-style="latex"] article h4+p,
+html[data-style="latex"] article blockquote p,
+html[data-style="latex"] article li p{text-indent:0}
+html[data-style="latex"] article h1{text-align:center; font-size:1.75em; font-weight:700}
+html[data-style="latex"] article h2{font-size:1.3em; font-weight:700; border-bottom:0;
+  margin:1.9em 0 .7em}
+html[data-style="latex"] article h3{font-size:1.1em; font-weight:700}
+html[data-style="latex"] #meta{text-align:center; border-bottom:0}
+html[data-style="latex"] article blockquote{font-style:normal; font-size:.95em;
+  border-left:0; padding:0 2.5em}
+
+/* ===== tufte：Edward Tufte 的书籍设计（tufte-css 的排版部分）。
+   标志性的米白纸、et-book/Palatino、斜体不加粗的标题、正文靠左把右边留白。
+   markdown 没有边注语法，所以只做得到视觉部分。 ===== */
+html[data-style="tufte"]{
+  --serif:"et-book","Palatino","Palatino Linotype","Book Antiqua",Georgia,
+          "Songti SC","Source Han Serif SC",serif;
+  --measure:38rem;
+}
+html[data-style="tufte"]:not([data-theme="dark"]){
+  --bg:#fffff8; --bg-soft:#f4f4ec; --fg:#111111; --fg-dim:#6b6b63;
+  --rule:#dcdcd2; --accent:#111111; --accent-soft:#f0f0e6; --code-bg:#f4f4ec;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="tufte"]:not([data-theme="light"]){
+    --bg:#151513; --bg-soft:#1f1f1c; --fg:#f0f0e6; --fg-dim:#95958c;
+    --rule:#31312c; --accent:#f0f0e6; --accent-soft:#22221e; --code-bg:#1d1d1a;
+  }
+}
+html[data-style="tufte"][data-theme="dark"]{
+  --bg:#151513; --bg-soft:#1f1f1c; --fg:#f0f0e6; --fg-dim:#95958c;
+  --rule:#31312c; --accent:#f0f0e6; --accent-soft:#22221e; --code-bg:#1d1d1a;
+}
+html[data-style="tufte"] body{line-height:1.62; font-size:calc(var(--fs) + 2px)}
+/* Tufte 的版面不居中：正文靠左，右边整片留白（原本是留给边注的） */
+html[data-style="tufte"] main{justify-content:flex-start; padding-left:3rem}
+html[data-style="tufte"] article h1,
+html[data-style="tufte"] article h2,
+html[data-style="tufte"] article h3,
+html[data-style="tufte"] article h4{
+  font-weight:400; font-style:italic; letter-spacing:0;
+  /* Tufte 的标题是斜体。但中文字体没有真斜体，浏览器会合成伪斜体（整体倾斜），
+     很难看。关掉合成后：拉丁走 Palatino 的真斜体，中文保持正体。 */
+  font-synthesis:style none; -webkit-font-synthesis:style none;
+}
+html[data-style="tufte"] article h1{font-size:2.3em; font-style:normal; line-height:1.15}
+html[data-style="tufte"] article h2{font-size:1.5em; border-bottom:0; margin-top:2.6em}
+html[data-style="tufte"] article a{border-bottom:1px solid var(--rule)}
+html[data-style="tufte"] article blockquote{border-left:0; padding-left:2.2em}
+
+/* ===== medium：Medium 的长文阅读排版。衬线正文配无衬线粗标题、字号偏大、行距宽松。 ===== */
+html[data-style="medium"]{
+  --serif:"Charter","Georgia","Iowan Old Style","Songti SC",serif;
+  --measure:42rem;
+}
+html[data-style="medium"]:not([data-theme="dark"]){
+  --bg:#ffffff; --bg-soft:#f7f7f7; --fg:#292929; --fg-dim:#757575;
+  --rule:#e6e6e6; --accent:#1a8917; --accent-soft:#eaf5ea; --code-bg:#f7f7f7;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="medium"]:not([data-theme="light"]){
+    --bg:#121212; --bg-soft:#1c1c1c; --fg:#e6e6e6; --fg-dim:#9a9a9a;
+    --rule:#2b2b2b; --accent:#4caf50; --accent-soft:#162316; --code-bg:#1c1c1c;
+  }
+}
+html[data-style="medium"][data-theme="dark"]{
+  --bg:#121212; --bg-soft:#1c1c1c; --fg:#e6e6e6; --fg-dim:#9a9a9a;
+  --rule:#2b2b2b; --accent:#4caf50; --accent-soft:#162316; --code-bg:#1c1c1c;
+}
+html[data-style="medium"] body{line-height:1.78; font-size:calc(var(--fs) + 3px)}
+html[data-style="medium"] article h1,
+html[data-style="medium"] article h2,
+html[data-style="medium"] article h3,
+html[data-style="medium"] article h4{
+  font-family:var(--sans); font-weight:700; letter-spacing:-.022em; line-height:1.25;
+}
+html[data-style="medium"] article h1{font-size:2.4em}
+html[data-style="medium"] article h2{font-size:1.55em; border-bottom:0; margin-top:2.4em}
+html[data-style="medium"] article blockquote{
+  border-left:3px solid var(--fg); font-style:italic; font-size:1.1em; color:var(--fg);
+}
+html[data-style="medium"] article p{margin-bottom:1.5em}
+
+/* ===== github：GitHub 上 README 渲染出来的样子。大家最眼熟的一套。 ===== */
+html[data-style="github"]{
+  --serif:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,
+          "PingFang SC","Hiragino Sans GB",sans-serif;
+  --measure:46rem;
+}
+html[data-style="github"]:not([data-theme="dark"]){
+  --bg:#ffffff; --bg-soft:#f6f8fa; --fg:#1f2328; --fg-dim:#59636e;
+  --rule:#d1d9e0; --accent:#0969da; --accent-soft:#ddf4ff; --code-bg:#f6f8fa;
+}
+@media (prefers-color-scheme: dark){
+  html[data-style="github"]:not([data-theme="light"]){
+    --bg:#0d1117; --bg-soft:#151b23; --fg:#f0f6fc; --fg-dim:#9198a1;
+    --rule:#3d444d; --accent:#4493f8; --accent-soft:#121d2f; --code-bg:#151b23;
+  }
+}
+html[data-style="github"][data-theme="dark"]{
+  --bg:#0d1117; --bg-soft:#151b23; --fg:#f0f6fc; --fg-dim:#9198a1;
+  --rule:#3d444d; --accent:#4493f8; --accent-soft:#121d2f; --code-bg:#151b23;
+}
+html[data-style="github"] body{line-height:1.6; font-size:calc(var(--fs) - 2px)}
+html[data-style="github"] article h1,
+html[data-style="github"] article h2,
+html[data-style="github"] article h3,
+html[data-style="github"] article h4{font-weight:600; letter-spacing:0; line-height:1.25}
+html[data-style="github"] article h1{font-size:2em; padding-bottom:.3em;
+  border-bottom:1px solid var(--rule)}
+html[data-style="github"] article h2{font-size:1.5em; padding-bottom:.3em}
+html[data-style="github"] article blockquote{
+  border-left:.25em solid var(--rule); color:var(--fg-dim); font-style:normal;
+  padding:0 1em; margin-left:0;
+}
+html[data-style="github"] article pre{border-radius:6px; border:0}
+html[data-style="github"] article th,
+html[data-style="github"] article td{border:1px solid var(--rule)}
+html[data-style="github"] article th{background:var(--bg-soft)}
+html[data-style="github"] article tbody tr:nth-child(2n){background:var(--bg-soft)}
+html[data-style="github"] article a{border-bottom:0}
+html[data-style="github"] article a:hover{text-decoration:underline}
+
+/* ===== 页面宽度。写在所有风格之后，所以能覆盖各风格自带的默认行宽；
+   不设 data-width（auto）时就跟随当前风格的默认值。 ===== */
+html[data-width="narrow"]{--measure:34rem}
+html[data-width="normal"]{--measure:44rem}
+html[data-width="wide"]  {--measure:56rem}
+html[data-width="full"]  {--measure:none}
+"""
+
+
+# --------------------------------------------------------------------------
+# 6. 页面 JS
+# --------------------------------------------------------------------------
+
+JS = r"""
+window.MathJax = {
+  tex: {
+    // 只认 \( \) 和 \[ \]；$ 完全不参与扫描（公式边界在 Python 侧已经定好了）
+    inlineMath: [['\\(','\\)']],
+    displayMath: [['\\[','\\]']],
+    processEscapes: false,
+    processEnvironments: true,
+    processRefs: true,
+    tags: 'ams',            // \label / \eqref 交叉引用 + 自动编号
+    tagSide: 'right',
+    packages: {
+      '[+]': ['ams','amscd','bbox','boldsymbol','braket','bussproofs',
+        'cancel','cases','centernot','color','colortbl','empheq','enclose','extpfeil',
+        'gensymb','html','mathtools','mhchem','newcommand','physics','textcomp',
+        'textmacros','unicode','upgreek','verb','configmacros','action'],
+      // noerrors 会把语法出错的公式整条伪装成普通文本，让你以为它本来就是文字 —— 摘掉。
+      // noundefined 留着：它把不认识的命令排成红字、公式其余部分照常渲染，
+      // 于是「\undefinedCmd{x} + \alpha^2」至少 α² 还看得见，而不是整条作废。
+      // 它留下的红字带 fill="red"，下面的检测照样抓得到，所以不会变成静默失败。
+      '[-]': ['noerrors']
+    }
+  },
+  svg: { fontCache:'global', scale:1.0, exFactor:.5 },
+  options: {
+    enableMenu: true,   // 右键可以复制原始 LaTeX
+    skipHtmlTags: ['script','noscript','style','textarea','pre','code','annotation','annotation-xml']
+  },
+  startup: {
+    pageReady() {
+      return MathJax.startup.defaultPageReady().then(() => {
+        // 不能只信 MathJax 自己报的错。它有三种失败方式：
+        //   1) merror 节点（语法错误，红色）
+        //   2) 抛异常后**整条跳过**，页面上留下原始 LaTeX，什么提示都没有 ← 最危险
+        //   3) 正常渲染
+        // 所以逐条核对：每个公式槽位里到底有没有长出 mjx-container。
+        // 分两级，因为这两种问题的严重程度差很多：
+        //   dead —— 整条排不出来（语法错误，比如括号没配对）。红色虚线框，显示原始 LaTeX。
+        //   warn —— 排出来了，但里面有 MathJax 不认识的命令（noundefined 排成红字）。
+        //            公式主体仍然可读，只在下面加橙色虚下划线提示。
+        const slots = [...document.querySelectorAll('.mjx-inline, .mjx-block')];
+        const dead = slots.filter(s =>
+          !s.querySelector('mjx-container') || s.querySelector('[data-mml-node="merror"]'));
+        const warn = slots.filter(s =>
+          !dead.includes(s) && s.querySelector('svg [fill="red"]'));
+        dead.forEach(s => s.classList.add('mjx-failed'));
+        warn.forEach(s => s.classList.add('mjx-warn'));
+        const bad = dead.concat(warn);
+        document.body.dataset.mathTotal = slots.length;
+        document.body.dataset.mathFailed = dead.length;
+        document.body.dataset.mathWarn = warn.length;
+        if (bad.length) {
+          const b = document.getElementById('mjerr');
+          // 措辞要指向文档而不是阅读器：绝大多数情况是这条公式本身写错了，
+          // 说成「渲染失败」会让人以为是工具坏了。
+          const parts = [];
+          if (dead.length) parts.push(`${dead.length} 处排不出来`);
+          if (warn.length) parts.push(`${warn.length} 处含不认识的命令`);
+          document.getElementById('mjerr-text').textContent =
+            `文档里 ${parts.join('，')}（共 ${slots.length} 处公式）· 点击逐条定位`;
+          b.title = '排不出来通常是括号没配对；不认识的命令多半是拼错了，'
+                  + '或者用了需要额外宏包的写法（公式其余部分照常渲染）';
+          b.style.display = 'block';
+          document.getElementById('mjerr-x').onclick = (ev) => {
+            ev.stopPropagation();
+            b.style.display = 'none';
+          };
+          let k = 0;
+          b.onclick = () => {
+            const t = bad[k++ % bad.length];
+            t.scrollIntoView({block:'center', behavior:'smooth'});
+            t.animate([{opacity:1},{opacity:.25},{opacity:1}], {duration:600, iterations:2});
+            const tex = (t.dataset.tex || '').trim();
+            flash(`第 ${((k - 1) % bad.length) + 1}/${bad.length} 处：`
+                  + (tex.length > 60 ? tex.slice(0, 60) + '…' : tex));
+          };
+          if (dead.length) console.warn('[quietmd] 这些公式排不出来：', dead.map(e => e.dataset.tex));
+          if (warn.length) console.warn('[quietmd] 这些公式里有不认识的命令：', warn.map(e => e.dataset.tex));
+        }
+        // 点公式复制它的 LaTeX 源码
+        slots.forEach(s => {
+          s.style.cursor = 'copy';
+          s.addEventListener('click', ev => {
+            if (ev.detail !== 2) return;            // 双击才复制，免得误触
+            navigator.clipboard?.writeText(s.dataset.tex || '');
+            flash('已复制 LaTeX');
+          });
+        });
+        // 装不下的公式标记出来，右缘渐隐提示可以横向滚动
+        document.querySelectorAll('.mjx-block').forEach(el => {
+          const mark = () => {
+            const over = el.scrollWidth - el.clientWidth > 2;
+            el.classList.toggle('wide', over);
+            el.classList.toggle('at-end', over && el.scrollLeft >= el.scrollWidth - el.clientWidth - 2);
+          };
+          mark();
+          el.addEventListener('scroll', mark, {passive:true});
+          addEventListener('resize', mark);
+        });
+        document.body.dataset.mathReady = '1';
+        const y = sessionStorage.getItem(SKEY);
+        if (y) window.scrollTo(0, +y);
+      });
+    }
+  }
+};
+
+const SKEY = 'quietmd:' + location.pathname + location.search;
+
+// 屏幕底部的一过性提示。宽度这类变化不一定一眼看得出来，给个反馈。
+function flash(msg) {
+  const f = document.getElementById('flash');
+  if (!f) return;
+  f.textContent = msg;
+  f.style.opacity = '1';
+  clearTimeout(f._t);
+  f._t = setTimeout(() => { f.style.opacity = '0'; }, 1100);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // 表格加水平滚动容器，长表格不破版
+  document.querySelectorAll('article table').forEach(t => {
+    if (t.parentElement.classList.contains('tw')) return;
+    const w = document.createElement('div'); w.className = 'tw';
+    t.parentNode.insertBefore(w, t); w.appendChild(t);
+  });
+
+  const root = document.documentElement;
+
+  // 排版风格：四种全都内嵌，下拉框随时切换。CLI 的 --style 只决定初始值，
+  // 用户在页面上换过之后以他的选择为准（记在 localStorage）。
+  const STYLES = JSON.parse(document.getElementById('style-list').textContent);
+  const keys = Object.keys(STYLES);
+  const styleSel = document.getElementById('sel-style');
+  const savedStyle = localStorage.getItem('quietmd-style');
+  if (savedStyle && keys.includes(savedStyle)) root.dataset.style = savedStyle;
+  styleSel.value = root.dataset.style || 'paper';
+  styleSel.onchange = () => {
+    root.dataset.style = styleSel.value;
+    localStorage.setItem('quietmd-style', styleSel.value);
+  };
+
+  // 页面宽度：像字号一样用一对按钮在四档之间走。
+  // 初始不设 data-width，跟随当前风格自带的行宽；第一次按按钮时，
+  // 先看当前实际行宽落在哪一档附近，再从那里迈一步 —— 这样第一下不会跳得莫名其妙。
+  const WKEYS = ['narrow', 'normal', 'wide', 'full'];
+  const WNAME = {narrow:'窄', normal:'适中', wide:'宽', full:'满幅'};
+  const WREM  = {narrow:34, normal:44, wide:56, full:Infinity};
+  const artEl = document.querySelector('article');
+  const curWidthIdx = () => {
+    if (root.dataset.width) return WKEYS.indexOf(root.dataset.width);
+    const rem = parseFloat(getComputedStyle(root).fontSize) || 16;
+    const mw = getComputedStyle(artEl).maxWidth;
+    const px = (mw === 'none') ? Infinity : parseFloat(mw);
+    let best = 0, bestD = Infinity;
+    WKEYS.forEach((k, i) => {
+      const d = Math.abs(WREM[k] * rem - px);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  };
+  const stepWidth = (d) => {
+    const i = Math.min(WKEYS.length - 1, Math.max(0, curWidthIdx() + d));
+    root.dataset.width = WKEYS[i];
+    localStorage.setItem('quietmd-width', WKEYS[i]);
+    flash('页面宽度 · ' + WNAME[WKEYS[i]]);
+  };
+  const savedW = localStorage.getItem('quietmd-width');
+  if (savedW && WKEYS.includes(savedW)) root.dataset.width = savedW;
+  document.getElementById('btn-narrower').onclick = () => stepWidth(-1);
+  document.getElementById('btn-wider').onclick    = () => stepWidth(+1);
+
+  // 目录收起。文档本身没目录时，直接把按钮藏掉，免得点了没反应。
+  const tocBox = document.getElementById('toc');
+  const tocBtn = document.getElementById('btn-toc');
+  if (!tocBox) {
+    tocBtn.style.display = 'none';
+    if (tocBtn.previousElementSibling) tocBtn.previousElementSibling.style.display = 'none';
+  } else {
+    const applyToc = (v) => {
+      root.dataset.toc = v;
+      tocBtn.classList.toggle('on', v !== 'off');
+      tocBtn.title = v === 'off' ? '显示目录 (h)' : '收起目录 (h)';
+    };
+    applyToc(localStorage.getItem('quietmd-toc') || 'on');
+    tocBtn.onclick = () => {
+      const v = root.dataset.toc === 'off' ? 'on' : 'off';
+      applyToc(v);
+      localStorage.setItem('quietmd-toc', v);
+    };
+  }
+
+  // 主题
+  const saved = localStorage.getItem('quietmd-theme');
+  if (saved) root.dataset.theme = saved;
+  document.getElementById('btn-theme').onclick = () => {
+    const cur = root.dataset.theme ||
+      (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    localStorage.setItem('quietmd-theme', next);
+  };
+
+  // 字号
+  let fs = +(localStorage.getItem('quietmd-fs') || 18);
+  const applyFs = () => { root.style.setProperty('--fs', fs + 'px');
+                          localStorage.setItem('quietmd-fs', fs); };
+  applyFs();
+  document.getElementById('btn-bigger').onclick  = () => { fs = Math.min(26, fs+1); applyFs(); };
+  document.getElementById('btn-smaller').onclick = () => { fs = Math.max(13, fs-1); applyFs(); };
+  document.getElementById('btn-print').onclick   = () => window.print();
+
+  // 阅读进度 + 目录高亮 + 记住滚动位置
+  const prog = document.getElementById('prog');
+  const links = [...document.querySelectorAll('#toc a')];
+  const heads = links.map(a => document.getElementById(a.dataset.id)).filter(Boolean);
+  let tick = false;
+  const onScroll = () => {
+    if (tick) return; tick = true;
+    requestAnimationFrame(() => {
+      tick = false;
+      const h = document.documentElement.scrollHeight - innerHeight;
+      prog.style.width = (h > 0 ? (scrollY / h) * 100 : 0) + '%';
+      sessionStorage.setItem(SKEY, scrollY);
+      let cur = -1;
+      for (let i = 0; i < heads.length; i++) {
+        if (heads[i].getBoundingClientRect().top <= 90) cur = i; else break;
+      }
+      links.forEach((a, i) => a.classList.toggle('on', i === cur));
+      if (cur >= 0) {
+        const a = links[cur], box = document.getElementById('toc');
+        const r = a.getBoundingClientRect(), br = box.getBoundingClientRect();
+        if (r.top < br.top + 8 || r.bottom > br.bottom - 8)
+          a.scrollIntoView({block:'nearest'});
+      }
+    });
+  };
+  addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  // 键盘：j/k 滚动，t 主题，/ 聚焦搜索(浏览器原生)，g/G 首尾
+  addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    if (e.key === 'j') scrollBy({top: 120, behavior:'smooth'});
+    else if (e.key === 'k') scrollBy({top:-120, behavior:'smooth'});
+    else if (e.key === 't') document.getElementById('btn-theme').click();
+    else if (e.key === 'h') document.getElementById('btn-toc').click();
+    else if (e.key === '[') document.getElementById('btn-narrower').click();
+    else if (e.key === ']') document.getElementById('btn-wider').click();
+    else if (e.key === 's') {                       // s 循环切下一个风格
+      const sel = document.getElementById('sel-style');
+      sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+      sel.dispatchEvent(new Event('change'));
+    }
+    else if (e.key === 'g') scrollTo({top:0, behavior:'smooth'});
+    else if (e.key === 'G') scrollTo({top:document.body.scrollHeight, behavior:'smooth'});
+  });
+});
+"""
+
+WATCH_JS = r"""
+// --watch：轮询文件 mtime，变了就重载（滚动位置由 sessionStorage 保住）
+(function(){
+  let last = null;
+  setInterval(async () => {
+    try {
+      const r = await fetch('/__stamp', {cache:'no-store'});
+      const v = await r.text();
+      if (last === null) { last = v; return; }
+      if (v !== last) location.reload();
+    } catch(e) {}
+  }, 700);
+})();
+"""
+
+
+# --------------------------------------------------------------------------
+# 7. 组页
+# --------------------------------------------------------------------------
+
+def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
+               style: str = "paper") -> str:
+    raw = md_path.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+
+    meta, text = split_front_matter(text)
+
+    # ① 上锁：公式先从原文里抠出来
+    locked, math = MathLocker(text).run()
+
+    # ② Markdown 渲染（此时文中只有占位符，解析器碰不到任何 LaTeX）
+    md = build_markdown()
+    body, toc = render_markdown(locked, md)
+
+    # ③ 原样放回
+    body = restore_math(body, math)
+    body = inline_assets(body, md_path.parent)
+    # 本地阅读器也不该执行文档里夹带的脚本
+    body = re.sub(r"<script[\s\S]*?</script>|<iframe[\s\S]*?</iframe>", "", body, flags=re.I)
+
+    # front matter 标题块
+    meta_html = ""
+    if meta:
+        title = meta.get("title") or meta.get("Title")
+        # front matter 的 title 和正文第一个 h1 常常是同一句，别印两遍
+        if title and toc and toc[0]["level"] == 1 and \
+                toc[0]["text"].strip() == str(title).strip():
+            h1 = toc.pop(0)
+            body = re.sub(r"<h1[^>]*id=\"" + re.escape(h1["id"]) + r"\"[^>]*>.*?</h1>",
+                          "", body, count=1, flags=re.S)
+        subs = []
+        for k in ("author", "authors", "date", "subtitle", "journal", "affiliation"):
+            v = meta.get(k)
+            if v:
+                v = ", ".join(map(str, v)) if isinstance(v, list) else str(v)
+                subs.append(html.escape(v))
+        if title or subs:
+            parts = [f'<div class="t">{html.escape(str(title))}</div>'] if title else []
+            parts += [f'<div class="s">{s}</div>' for s in subs]
+            meta_html = '<div id="meta">' + "".join(parts) + "</div>"
+
+    toc_html = ""
+    if len(toc) >= 2:
+        items = "".join(
+            f'<a class="l{h["level"]}" href="#{h["id"]}" data-id="{h["id"]}">'
+            f'{html.escape(h["text"])}</a>'
+            for h in toc
+        )
+        toc_html = f'<nav id="toc"><p class="ttl">目录</p>{items}</nav>'
+
+    name = html.escape(md_path.name)
+
+    style_opts = "".join(
+        f'<option value="{k}"{" selected" if k == style else ""}>{v}</option>'
+        for k, v in STYLES.items()
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh" data-style="{style}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{name}</title>
+<style>{CSS}</style>
+<style>{pygments_css()}</style>
+<style>{STYLE_CSS}</style>
+<script type="application/json" id="style-list">{json.dumps(STYLES, ensure_ascii=False)}</script>
+</head>
+<body>
+<div id="prog"></div>
+<div id="bar">
+  <span class="name">{name}</span>
+  <span style="color:var(--fg-dim);opacity:.5">·</span>
+  <button id="btn-toc" title="显示 / 收起目录 (h)">目录</button>
+  <span class="sp"></span>
+  <span class="sel hide-sm"><select id="sel-style" title="排版风格 (s 循环切换)">{style_opts}</select></span>
+  <button id="btn-narrower" class="hide-sm" title="收窄页面 ([)">宽−</button>
+  <button id="btn-wider" class="hide-sm" title="加宽页面 (])">宽+</button>
+  <button id="btn-smaller" title="缩小字号">A−</button>
+  <button id="btn-bigger" title="放大字号">A+</button>
+  <button id="btn-theme" title="切换明暗 (t)">◐</button>
+  <button id="btn-print" title="打印 / 存 PDF">⎙</button>
+</div>
+<div id="wrap">
+{toc_html}
+<main><article>{meta_html}{body}</article></main>
+</div>
+<div id="mjerr"><span id="mjerr-text"></span><button id="mjerr-x" title="关掉这个提示">×</button></div>
+<div id="flash"></div>
+<script>{JS}</script>
+<script>{mathjax_js}</script>
+{"<script>" + WATCH_JS + "</script>" if watch else ""}
+</body>
+</html>
+"""
+
+
+# --------------------------------------------------------------------------
+# 8. CLI
+# --------------------------------------------------------------------------
+
+def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
+          style: str = "paper") -> None:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/__stamp"):
+                try:
+                    stamp = str(md_path.stat().st_mtime_ns)
+                except OSError:
+                    stamp = "gone"
+                self._send(stamp.encode(), "text/plain")
+                return
+            try:
+                page = build_html(md_path, mathjax_js, watch=True, style=style)
+            except Exception as e:  # 渲染出错也要看得见，而不是白屏
+                page = (f"<pre style='font:14px monospace;padding:2rem;color:#c0392b'>"
+                        f"{html.escape(repr(e))}</pre>")
+            self._send(page.encode(), "text/html; charset=utf-8")
+
+        def _send(self, data: bytes, ctype: str):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"mdview  {md_path.name}  →  {url}   (存盘自动刷新，Ctrl-C 退出)", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n再见。")
+
+
+CHROME_CANDIDATES = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+]
+
+
+def check(md_path: Path, mathjax_js: str) -> int:
+    """真跑一遍 MathJax，把渲染不出来的公式列出来。
+
+    不是静态扫描 —— 是用无头浏览器实际渲染，然后逐条核对每个公式槽里有没有
+    长出 mjx-container。退出码 0 表示全部渲染成功，可以直接用在脚本里。
+    """
+    import subprocess
+    import tempfile
+
+    chrome = next((c for c in CHROME_CANDIDATES if Path(c).is_file()), None)
+    if not chrome:
+        print("找不到 Chrome/Chromium，--check 需要它来真跑一遍 MathJax。", file=sys.stderr)
+        return 2
+
+    page = build_html(md_path, mathjax_js, watch=False)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "check.html"
+        tmp.write_text(page, encoding="utf-8")
+        try:
+            out = subprocess.run(
+                [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+                 "--window-size=1400,900", "--virtual-time-budget=45000",
+                 "--dump-dom", tmp.as_uri()],
+                capture_output=True, text=True, timeout=180,
+            ).stdout
+        except subprocess.TimeoutExpired:
+            print("渲染超时。", file=sys.stderr)
+            return 2
+
+    m = re.search(r'data-math-total="(\d+)" data-math-failed="(\d+)" data-math-warn="(\d+)"', out)
+    if not m:
+        print("没能读到渲染结果（页面可能没跑完 MathJax）。", file=sys.stderr)
+        return 2
+    total, failed, warned = (int(m.group(i)) for i in (1, 2, 3))
+
+    def collect(cls):
+        return [" ".join(html.unescape(x).split()) for x in
+                re.findall(r'class="mjx-\w+ ' + cls + r'" data-tex="([^"]*)"', out)]
+
+    print(f"{md_path.name}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
+    for label, items in (("排不出来", collect("mjx-failed")),
+                         ("不认识的命令", collect("mjx-warn"))):
+        for i, tex in enumerate(items, 1):
+            print(f"  [{label}] {i}. {tex[:110]}{'…' if len(tex) > 110 else ''}")
+    if not failed and not warned:
+        print("  全部正常。")
+    return 1 if (failed or warned) else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="quietmd", description="把数学公式放在第一位的 Markdown 阅读器")
+    ap.add_argument("file", help="要看的 .md 文件")
+    ap.add_argument("-w", "--watch", action="store_true", help="实时预览：存盘即刷新")
+    ap.add_argument("-o", "--out", help="输出 HTML 路径（不打开浏览器）")
+    ap.add_argument("-p", "--port", type=int, default=0, help="--watch 的端口（默认随机）")
+    ap.add_argument("--no-open", action="store_true", help="不要自动打开浏览器")
+    ap.add_argument("-c", "--check", action="store_true",
+                    help="只检查：真跑一遍 MathJax，列出渲染不出来的公式（全部正常则退出码 0）")
+    ap.add_argument("-s", "--style", default="paper", choices=list(STYLES),
+                    help="初始排版风格：" + "；".join(f"{k}={v}" for k, v in STYLES.items())
+                         + "（页面里按 s 可随时切换）")
+    args = ap.parse_args()
+
+    md_path = Path(args.file).expanduser().resolve()
+    if not md_path.is_file():
+        print(f"找不到文件：{md_path}", file=sys.stderr)
+        return 1
+    mathjax_js = ensure_mathjax().read_text(encoding="utf-8")
+
+    if args.check:
+        return check(md_path, mathjax_js)
+
+    if args.watch:
+        serve(md_path, mathjax_js, args.port, open_browser=not args.no_open,
+              style=args.style)
+        return 0
+
+    page = build_html(md_path, mathjax_js, watch=False, style=args.style)
+    if args.out:
+        out = Path(args.out).expanduser().resolve()
+    else:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # 带上路径哈希：不同目录下的同名 md（到处都有的 README.md）不会互相覆盖
+        tag = hashlib.sha1(str(md_path).encode()).hexdigest()[:6]
+        out = CACHE_DIR / f"{md_path.stem}-{tag}.html"
+    out.write_text(page, encoding="utf-8")
+    print(f"{out}  ({out.stat().st_size/1024/1024:.1f} MB, 自包含)")
+    if not args.out and not args.no_open:
+        webbrowser.open(out.as_uri())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
