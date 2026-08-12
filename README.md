@@ -23,6 +23,7 @@ $ quietmd paper.md            # render and open; writes paper.html next to the s
 $ quietmd paper.md -w         # live preview, reloads on save
 $ quietmd paper.md -o out.html  # just the file — mail it to someone, it works offline
 $ quietmd paper.md --check    # list formulas that failed to render; exit 0 if all fine
+$ quietmd paper.md -s latex --lang zh   # initial style and interface language
 ```
 
 ---
@@ -153,9 +154,17 @@ cross-references, plus every MathJax extension package (mhchem, physics, mathtoo
 YAML front matter, Pygments highlighting, autolinks.
 
 **Reading** — side ToC that follows your scroll, progress bar, light/dark following the
-system (`t` to override), font size, page width in four steps (`[` / `]`), long equations
-scroll horizontally with a fade hint, double-click any formula to copy its LaTeX,
-print/PDF stylesheet, returns to where you were on reload.
+system (`t` to override), long equations scroll horizontally with a fade hint,
+double-click any formula to copy its LaTeX, print/PDF stylesheet, returns to where you
+were on reload.
+
+**The toolbar** reads like a typesetter's rule rather than an app header. Groups are
+separated by hairlines; the two steppers show **the actual typographic parameters** —
+how many characters fit on a line (`70ch`) and the body size (`17px`) — not "narrow /
+medium / wide". The measure is genuinely measured, not looked up: it probes the current
+font and divides the column width, so it moves when you change style or size, because
+that's the truth. Interface language is English by default with a `中文` button (`l`);
+your choice is remembered, as are style, width, size, theme and ToC state.
 
 **Output** — the HTML lands next to the source file (`paper.md` → `paper.html`), so it's
 easy to find and easy to hand to someone. If a file of that name already exists and
@@ -166,7 +175,7 @@ stripped; MathJax is embedded, so nothing touches the network after the first ru
 You'll probably want `*.html` in your `.gitignore`.
 
 **Keys** — `j`/`k` scroll · `g`/`G` top/bottom · `t` theme · `s` style · `h` ToC ·
-`[` `]` width · `⌘F` finds LaTeX source too.
+`l` language · `[` `]` width · `⌘F` finds LaTeX source too.
 
 ## Install
 

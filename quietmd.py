@@ -540,39 +540,87 @@ body{
   font-variant-numeric:oldstyle-nums proportional-nums;
 }
 
-/* ---------- 顶栏 ---------- */
+/* ---------- 顶栏：一条排字房的操作台，不是网页 header ----------
+   分组之间用极细的竖线隔开，像标尺上的刻度；数值型控件做成 stepper，
+   并且显示真实的排版参数（行宽多少 ch、字号多少 px）而不是「窄/中/宽」——
+   读这本工具的人看得懂 measure，而这个项目的立场本来就是「给你真实的数字」。
+   工具栏自己不带任何品牌色：它要在八种风格、明暗两套配色下都不违和。 */
 #bar{
-  position:fixed; top:0; left:0; right:0; height:44px; z-index:50;
-  display:flex; align-items:center; gap:.5rem; padding:0 .9rem;
-  background:color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter:saturate(180%) blur(14px);
-  border-bottom:1px solid var(--rule); font-family:var(--sans); font-size:13px;
+  position:fixed; top:0; left:0; right:0; height:46px; z-index:50;
+  display:flex; align-items:center; gap:.15rem; padding:0 .55rem;
+  background:color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter:saturate(180%) blur(16px);
+  -webkit-backdrop-filter:saturate(180%) blur(16px);
+  border-bottom:1px solid var(--rule);
+  font-family:var(--sans); font-size:11.5px; letter-spacing:.012em;
 }
-#bar .name{color:var(--fg-dim); font-weight:500; overflow:hidden;
-  text-overflow:ellipsis; white-space:nowrap; flex:0 1 auto}
-#bar .sp{flex:1}
+#bar .fname{
+  color:var(--fg-dim); font-weight:500; margin-left:.15rem;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:0 1 auto;
+}
+#bar .sp{flex:1 1 auto; min-width:.5rem}
+
+/* 控件分组：左边一条发丝线当刻度 */
+#bar .grp{
+  display:flex; align-items:center; gap:.05rem;
+  padding-left:.4rem; margin-left:.35rem;
+  border-left:1px solid var(--rule);
+}
+#bar .grp:first-of-type{border-left:0; margin-left:0}
+
 #bar button{
-  font:inherit; color:var(--fg-dim); background:transparent; cursor:pointer;
-  border:1px solid transparent; border-radius:7px; padding:.25rem .55rem; line-height:1;
+  font:inherit; color:var(--fg-dim); background:transparent; border:0;
+  border-radius:6px; cursor:pointer; padding:.34rem .42rem; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center;
+  transition:background .12s ease, color .12s ease, transform .08s ease;
 }
 #bar button:hover{background:var(--bg-soft); color:var(--fg)}
-#bar button.on{color:var(--accent); background:var(--accent-soft)}
-/* 下拉框：去掉原生外观，自己画箭头，这样在明暗两套配色下都对得上 */
+#bar button:active{transform:scale(.94)}
+#bar button:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+#bar button.on{color:var(--accent)}
+#bar button[disabled]{opacity:.32; pointer-events:none}
+#bar .ico svg{width:15px; height:15px; display:block}
+#bar .ico{padding:.34rem}
+
+/* stepper 中间的读数。tabular-nums 是关键：数字跳动时宽度不变，栏不抖 */
+#bar .val{
+  min-width:3.3rem; text-align:center; color:var(--fg-dim);
+  font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;
+  cursor:default; user-select:none;
+}
+#bar .val u{
+  font-style:normal; text-decoration:none;
+  opacity:.5; font-size:.86em; margin-left:.12em;
+}
+
+#bar #btn-lang{
+  font-size:11px; padding:.3rem .48rem;
+  border:1px solid color-mix(in srgb, var(--rule) 80%, transparent);
+}
+
+/* 下拉框：去掉原生外观自己画箭头，这样在明暗两套配色下都对得上 */
 #bar .sel{position:relative; display:inline-flex; align-items:center}
 #bar .sel::after{
-  content:"▾"; position:absolute; right:.5rem; font-size:10px;
-  color:var(--fg-dim); pointer-events:none;
+  content:""; position:absolute; right:.52rem; width:6px; height:6px;
+  border-right:1.2px solid var(--fg-dim); border-bottom:1.2px solid var(--fg-dim);
+  transform:translateY(-2px) rotate(45deg); opacity:.7; pointer-events:none;
 }
 #bar select{
-  font:inherit; font-size:12.5px; color:var(--fg-dim); line-height:1;
-  background:transparent; border:1px solid var(--rule); border-radius:7px;
-  padding:.24rem 1.45rem .24rem .55rem; cursor:pointer;
+  font:inherit; color:var(--fg-dim); line-height:1;
+  background:transparent; border:1px solid color-mix(in srgb, var(--rule) 80%, transparent);
+  border-radius:6px; padding:.32rem 1.5rem .32rem .55rem; cursor:pointer;
   -webkit-appearance:none; appearance:none;
 }
 #bar select:hover{color:var(--fg); background:var(--bg-soft)}
-#bar select:focus{outline:2px solid var(--accent-soft); outline-offset:1px}
-#bar select option{color:#111; background:#fff}   /* 原生弹层始终用浅色，保证可读 */
-@media (max-width:820px){ #bar .hide-sm{display:none} }
+#bar select:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+#bar select option{color:#111; background:#fff}   /* 原生弹层始终浅色，保证可读 */
+
+@media (max-width:900px){ #bar .hide-sm{display:none} }
+@media (max-width:620px){ #bar .hide-xs{display:none} }
+@media (prefers-reduced-motion:reduce){
+  #bar button{transition:none}
+  #bar button:active{transform:none}
+}
 #prog{position:fixed;top:0;left:0;height:2px;background:var(--accent);z-index:60;width:0}
 
 /* ---------- 布局 ---------- */
@@ -723,15 +771,86 @@ mjx-container svg a{color:var(--accent)}
 # 这么写是为了让「风格」和「明暗」两个维度互不干扰 —— 换风格不该把暗色弄坏。
 # --------------------------------------------------------------------------
 
+# 排版风格。界面语言可以在页面上切换，所以每个名字都要两份。
 STYLES = {
-    "paper":      "纸张 · 学术衬线",
-    "latex":      "LaTeX · article 外观",
-    "book":       "书籍 · 沉浸连读",
-    "tufte":      "Tufte · 宽白边",
-    "medium":     "Medium · 长文阅读",
-    "github":     "GitHub · README 外观",
-    "swiss":      "瑞士 · 无衬线网格",
-    "manuscript": "稿件 · 双倍行距",
+    "paper":      {"en": "Paper · academic serif",   "zh": "纸张 · 学术衬线"},
+    "latex":      {"en": "LaTeX · article",          "zh": "LaTeX · article 外观"},
+    "book":       {"en": "Book · immersive",         "zh": "书籍 · 沉浸连读"},
+    "tufte":      {"en": "Tufte · wide margin",      "zh": "Tufte · 宽白边"},
+    "medium":     {"en": "Medium · long-form",       "zh": "Medium · 长文阅读"},
+    "github":     {"en": "GitHub · README",          "zh": "GitHub · README 外观"},
+    "swiss":      {"en": "Swiss · sans grid",        "zh": "瑞士 · 无衬线网格"},
+    "manuscript": {"en": "Manuscript · double-spaced", "zh": "稿件 · 双倍行距"},
+}
+
+# 界面文案。默认英文 —— 这是个开源项目，读者不一定看得懂中文；
+# 页面上一个按钮就能切到中文，选择记在 localStorage。
+UI = {
+    "en": {
+        "lang_btn": "中文", "lang_title": "切换到中文 / Switch to Chinese",
+        "toc": "Contents", "toc_title": "Show / hide contents (h)", "toc_head": "Contents",
+        "style_title": "Typographic style (press s to cycle)",
+        "narrower": "W−", "narrower_title": "Narrower page ([)",
+        "wider": "W+", "wider_title": "Wider page (])",
+        "smaller_title": "Smaller text", "bigger_title": "Larger text",
+        "theme_title": "Toggle light / dark (t)", "print_title": "Print / save as PDF",
+        "widths": {"narrow": "Narrow", "normal": "Medium", "wide": "Wide", "full": "Full width"},
+        "width_flash": "Page width · ", "copied": "LaTeX copied",
+        "err_dead": "{n} won't render", "err_warn": "{n} with unknown commands",
+        "err_banner": "In this document: {parts} ({total} formulas) · click to locate each",
+        "err_title": "\"Won't render\" is usually an unbalanced brace; "
+                     "\"unknown command\" is usually a typo or a macro from a package "
+                     "you don't have (the rest of the formula still renders).",
+        "err_close": "Dismiss", "err_nth": "#{i} of {n}: ",
+        "console_dead": "[quietmd] these formulas won't render:",
+        "console_warn": "[quietmd] these formulas contain unknown commands:",
+    },
+    "zh": {
+        "lang_btn": "EN", "lang_title": "Switch to English / 切换到英文",
+        "toc": "目录", "toc_title": "显示 / 收起目录 (h)", "toc_head": "目录",
+        "style_title": "排版风格（按 s 循环切换）",
+        "narrower": "宽−", "narrower_title": "收窄页面 ([)",
+        "wider": "宽+", "wider_title": "加宽页面 (])",
+        "smaller_title": "缩小字号", "bigger_title": "放大字号",
+        "theme_title": "切换明暗 (t)", "print_title": "打印 / 存 PDF",
+        "widths": {"narrow": "窄", "normal": "适中", "wide": "宽", "full": "满幅"},
+        "width_flash": "页面宽度 · ", "copied": "已复制 LaTeX",
+        "err_dead": "{n} 处排不出来", "err_warn": "{n} 处含不认识的命令",
+        "err_banner": "文档里 {parts}（共 {total} 处公式）· 点击逐条定位",
+        "err_title": "排不出来通常是括号没配对；不认识的命令多半是拼错了，"
+                     "或者用了需要额外宏包的写法（公式其余部分照常渲染）",
+        "err_close": "关掉这个提示", "err_nth": "第 {i}/{n} 处：",
+        "console_dead": "[quietmd] 这些公式排不出来：",
+        "console_warn": "[quietmd] 这些公式里有不认识的命令：",
+    },
+}
+
+
+def cli_lang() -> str:
+    """命令行输出的语言：显式 --lang 优先，否则看环境变量。
+
+    页面默认英文（开源项目的读者不一定看中文），但命令行是本机在用，
+    跟随系统语言更顺手 —— 中文环境下仍然说中文。
+    """
+    env = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
+           or os.environ.get("LANG") or "")
+    return "zh" if "zh" in env.lower() else "en"
+
+# 顶栏图标。统一 1.25px 描边、currentColor，跟正文衬线的细笔画一个调子。
+ICONS = {
+    "sidebar": '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+               'stroke-width="1.25" stroke-linejoin="round">'
+               '<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2"/>'
+               '<path d="M6.2 2.6v10.8" /><rect x="1.6" y="2.6" width="4.6" '
+               'height="10.8" rx="2" fill="currentColor" stroke="none" opacity=".85"/></svg>',
+    "theme":   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25">'
+               '<circle cx="8" cy="8" r="5.4"/>'
+               '<path d="M8 2.6a5.4 5.4 0 0 1 0 10.8z" fill="currentColor" stroke="none"/></svg>',
+    "print":   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+               'stroke-width="1.25" stroke-linejoin="round">'
+               '<path d="M4.4 6V2.6h7.2V6"/>'
+               '<rect x="1.9" y="6" width="12.2" height="5" rx="1.4"/>'
+               '<path d="M4.4 9.6h7.2v3.8H4.4z"/></svg>',
 }
 
 # 页面宽度档位（rem）。顶栏的「宽−/宽+」在这四档之间走；
@@ -1083,17 +1202,25 @@ window.MathJax = {
         document.body.dataset.mathTotal = slots.length;
         document.body.dataset.mathFailed = dead.length;
         document.body.dataset.mathWarn = warn.length;
+        window.__quietmdBad = {dead, warn, total: slots.length};
         if (bad.length) {
+          window.renderBanner = function () {
+            const L = JSON.parse(document.getElementById('i18n').textContent);
+            const lg = document.documentElement.getAttribute('lang') || 'en';
+            const tt = (k) => (L[lg] || L.en)[k];
+            const parts = [];
+            if (dead.length) parts.push(tt('err_dead').replace('{n}', dead.length));
+            if (warn.length) parts.push(tt('err_warn').replace('{n}', warn.length));
+            const sep = lg === 'zh' ? '，' : ', ';
+            document.getElementById('mjerr-text').textContent =
+              tt('err_banner').replace('{parts}', parts.join(sep))
+                              .replace('{total}', slots.length);
+            const b2 = document.getElementById('mjerr');
+            b2.title = tt('err_title');
+            document.getElementById('mjerr-x').title = tt('err_close');
+          };
           const b = document.getElementById('mjerr');
-          // 措辞要指向文档而不是阅读器：绝大多数情况是这条公式本身写错了，
-          // 说成「渲染失败」会让人以为是工具坏了。
-          const parts = [];
-          if (dead.length) parts.push(`${dead.length} 处排不出来`);
-          if (warn.length) parts.push(`${warn.length} 处含不认识的命令`);
-          document.getElementById('mjerr-text').textContent =
-            `文档里 ${parts.join('，')}（共 ${slots.length} 处公式）· 点击逐条定位`;
-          b.title = '排不出来通常是括号没配对；不认识的命令多半是拼错了，'
-                  + '或者用了需要额外宏包的写法（公式其余部分照常渲染）';
+          renderBanner();
           b.style.display = 'block';
           document.getElementById('mjerr-x').onclick = (ev) => {
             ev.stopPropagation();
@@ -1101,15 +1228,21 @@ window.MathJax = {
           };
           let k = 0;
           b.onclick = () => {
-            const t = bad[k++ % bad.length];
-            t.scrollIntoView({block:'center', behavior:'smooth'});
-            t.animate([{opacity:1},{opacity:.25},{opacity:1}], {duration:600, iterations:2});
-            const tex = (t.dataset.tex || '').trim();
-            flash(`第 ${((k - 1) % bad.length) + 1}/${bad.length} 处：`
-                  + (tex.length > 60 ? tex.slice(0, 60) + '…' : tex));
+            const el = bad[k++ % bad.length];
+            el.scrollIntoView({block:'center', behavior:'smooth'});
+            el.animate([{opacity:1},{opacity:.25},{opacity:1}], {duration:600, iterations:2});
+            const L = JSON.parse(document.getElementById('i18n').textContent);
+            const lg = document.documentElement.getAttribute('lang') || 'en';
+            const tex = (el.dataset.tex || '').trim();
+            document.getElementById('flash') && flash(
+              (L[lg] || L.en)['err_nth'].replace('{i}', ((k - 1) % bad.length) + 1)
+                                        .replace('{n}', bad.length)
+              + (tex.length > 60 ? tex.slice(0, 60) + '…' : tex));
           };
-          if (dead.length) console.warn('[quietmd] 这些公式排不出来：', dead.map(e => e.dataset.tex));
-          if (warn.length) console.warn('[quietmd] 这些公式里有不认识的命令：', warn.map(e => e.dataset.tex));
+          const L0 = JSON.parse(document.getElementById('i18n').textContent);
+          const lg0 = document.documentElement.getAttribute('lang') || 'en';
+          if (dead.length) console.warn((L0[lg0] || L0.en)['console_dead'], dead.map(e => e.dataset.tex));
+          if (warn.length) console.warn((L0[lg0] || L0.en)['console_warn'], warn.map(e => e.dataset.tex));
         }
         // 点公式复制它的 LaTeX 源码
         slots.forEach(s => {
@@ -1117,7 +1250,8 @@ window.MathJax = {
           s.addEventListener('click', ev => {
             if (ev.detail !== 2) return;            // 双击才复制，免得误触
             navigator.clipboard?.writeText(s.dataset.tex || '');
-            flash('已复制 LaTeX');
+            const L1 = JSON.parse(document.getElementById('i18n').textContent);
+            flash((L1[document.documentElement.getAttribute('lang') || 'en'] || L1.en)['copied']);
           });
         });
         // 装不下的公式标记出来，右缘渐隐提示可以横向滚动
@@ -1160,29 +1294,32 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   const root = document.documentElement;
-
-  // 排版风格：四种全都内嵌，下拉框随时切换。CLI 的 --style 只决定初始值，
-  // 用户在页面上换过之后以他的选择为准（记在 localStorage）。
+  const I18N   = JSON.parse(document.getElementById('i18n').textContent);
   const STYLES = JSON.parse(document.getElementById('style-list').textContent);
-  const keys = Object.keys(STYLES);
+  const artEl  = document.querySelector('article');
+
+  let lang = localStorage.getItem('quietmd-lang')
+             || document.documentElement.getAttribute('lang') || 'en';
+  const t = (k) => (I18N[lang] || I18N.en)[k];
+
+  // ---- 排版风格 ----------------------------------------------------
+  const styleKeys = Object.keys(STYLES);
   const styleSel = document.getElementById('sel-style');
   const savedStyle = localStorage.getItem('quietmd-style');
-  if (savedStyle && keys.includes(savedStyle)) root.dataset.style = savedStyle;
-  styleSel.value = root.dataset.style || 'paper';
+  if (savedStyle && styleKeys.includes(savedStyle)) root.dataset.style = savedStyle;
   styleSel.onchange = () => {
     root.dataset.style = styleSel.value;
     localStorage.setItem('quietmd-style', styleSel.value);
+    refreshReadouts();
   };
 
-  // 页面宽度：像字号一样用一对按钮在四档之间走。
-  // 初始不设 data-width，跟随当前风格自带的行宽；第一次按按钮时，
-  // 先看当前实际行宽落在哪一档附近，再从那里迈一步 —— 这样第一下不会跳得莫名其妙。
+  // ---- 页面宽度：四档，读数显示真实行宽 ------------------------------
   const WKEYS = ['narrow', 'normal', 'wide', 'full'];
-  const WNAME = {narrow:'窄', normal:'适中', wide:'宽', full:'满幅'};
-  const WREM  = {narrow:34, normal:44, wide:56, full:Infinity};
-  const artEl = document.querySelector('article');
+  const WREM  = {narrow: 34, normal: 44, wide: 56, full: Infinity};
   const curWidthIdx = () => {
     if (root.dataset.width) return WKEYS.indexOf(root.dataset.width);
+    // 还没手动设过：看当前风格自带的行宽落在哪一档附近，从那里迈步，
+    // 免得第一下跳得莫名其妙
     const rem = parseFloat(getComputedStyle(root).fontSize) || 16;
     const mw = getComputedStyle(artEl).maxWidth;
     const px = (mw === 'none') ? Infinity : parseFloat(mw);
@@ -1197,36 +1334,68 @@ document.addEventListener('DOMContentLoaded', () => {
     const i = Math.min(WKEYS.length - 1, Math.max(0, curWidthIdx() + d));
     root.dataset.width = WKEYS[i];
     localStorage.setItem('quietmd-width', WKEYS[i]);
-    flash('页面宽度 · ' + WNAME[WKEYS[i]]);
+    refreshReadouts();
+    flash(t('width_flash') + t('widths')[WKEYS[i]]);
   };
   const savedW = localStorage.getItem('quietmd-width');
   if (savedW && WKEYS.includes(savedW)) root.dataset.width = savedW;
   document.getElementById('btn-narrower').onclick = () => stepWidth(-1);
   document.getElementById('btn-wider').onclick    = () => stepWidth(+1);
 
-  // 目录收起。文档本身没目录时，直接把按钮藏掉，免得点了没反应。
+  // ---- 字号 ----------------------------------------------------------
+  let fs = +(localStorage.getItem('quietmd-fs') || 17);
+  const applyFs = () => {
+    root.style.setProperty('--fs', fs + 'px');
+    localStorage.setItem('quietmd-fs', fs);
+    refreshReadouts();
+  };
+  document.getElementById('btn-smaller').onclick = () => { fs = Math.max(13, fs - 1); applyFs(); };
+  document.getElementById('btn-bigger').onclick  = () => { fs = Math.min(26, fs + 1); applyFs(); };
+
+  // ---- 两个读数 ------------------------------------------------------
+  // 行宽不是查表得来的，是真量出来的：拿正文当前字体量一个字符宽，
+  // 再除正文宽度。换风格、换字号它都会跟着变 —— 因为那才是事实。
+  const valMeasure = document.getElementById('val-measure');
+  const valSize = document.getElementById('val-size');
+  function refreshReadouts() {
+    const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit';
+    probe.textContent = '0'.repeat(50);
+    artEl.appendChild(probe);
+    const chw = probe.getBoundingClientRect().width / 50;
+    probe.remove();
+    const w = artEl.getBoundingClientRect().width;
+    const ch = (chw > 0) ? Math.round(w / chw) : 0;
+    valMeasure.innerHTML = ch + '<u>ch</u>';
+    valSize.innerHTML = fs + '<u>px</u>';
+    const i = curWidthIdx();
+    document.getElementById('btn-narrower').disabled = (i <= 0);
+    document.getElementById('btn-wider').disabled = (i >= WKEYS.length - 1);
+    document.getElementById('btn-smaller').disabled = (fs <= 13);
+    document.getElementById('btn-bigger').disabled = (fs >= 26);
+  }
+
+  // ---- 目录开关 ------------------------------------------------------
   const tocBox = document.getElementById('toc');
   const tocBtn = document.getElementById('btn-toc');
-  if (!tocBox) {
-    tocBtn.style.display = 'none';
-    if (tocBtn.previousElementSibling) tocBtn.previousElementSibling.style.display = 'none';
-  } else {
-    const applyToc = (v) => {
-      root.dataset.toc = v;
-      tocBtn.classList.toggle('on', v !== 'off');
-      tocBtn.title = v === 'off' ? '显示目录 (h)' : '收起目录 (h)';
-    };
+  const applyToc = (v) => {
+    root.dataset.toc = v;
+    tocBtn.classList.toggle('on', v !== 'off');
+  };
+  if (!tocBox) tocBtn.style.display = 'none';
+  else {
     applyToc(localStorage.getItem('quietmd-toc') || 'on');
     tocBtn.onclick = () => {
       const v = root.dataset.toc === 'off' ? 'on' : 'off';
       applyToc(v);
       localStorage.setItem('quietmd-toc', v);
+      refreshReadouts();
     };
   }
 
-  // 主题
-  const saved = localStorage.getItem('quietmd-theme');
-  if (saved) root.dataset.theme = saved;
+  // ---- 明暗 ----------------------------------------------------------
+  const savedTheme = localStorage.getItem('quietmd-theme');
+  if (savedTheme) root.dataset.theme = savedTheme;
   document.getElementById('btn-theme').onclick = () => {
     const cur = root.dataset.theme ||
       (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -1234,15 +1403,39 @@ document.addEventListener('DOMContentLoaded', () => {
     root.dataset.theme = next;
     localStorage.setItem('quietmd-theme', next);
   };
+  document.getElementById('btn-print').onclick = () => window.print();
 
-  // 字号
-  let fs = +(localStorage.getItem('quietmd-fs') || 18);
-  const applyFs = () => { root.style.setProperty('--fs', fs + 'px');
-                          localStorage.setItem('quietmd-fs', fs); };
+  // ---- 界面语言：默认英文，一个按钮切换，选择记住 ----------------------
+  function applyLang(next) {
+    lang = next;
+    localStorage.setItem('quietmd-lang', lang);
+    root.setAttribute('lang', lang);
+    const set = (id, attr, val) => {
+      const el = document.getElementById(id);
+      if (el) attr === 'text' ? (el.textContent = val) : el.setAttribute(attr, val);
+    };
+    set('btn-lang', 'text', t('lang_btn'));
+    set('btn-lang', 'title', t('lang_title'));
+    set('btn-toc', 'title', t('toc_title'));
+    set('sel-style', 'title', t('style_title'));
+    set('btn-narrower', 'text', '−'); set('btn-narrower', 'title', t('narrower_title'));
+    set('btn-wider', 'text', '+');    set('btn-wider', 'title', t('wider_title'));
+    set('btn-smaller', 'title', t('smaller_title'));
+    set('btn-bigger', 'title', t('bigger_title'));
+    set('btn-theme', 'title', t('theme_title'));
+    set('btn-print', 'title', t('print_title'));
+    const head = document.querySelector('#toc .ttl');
+    if (head) head.textContent = t('toc_head');
+    [...styleSel.options].forEach(o => { o.textContent = STYLES[o.value][lang]; });
+    styleSel.value = root.dataset.style || 'paper';
+    if (window.__quietmdBad) renderBanner();
+    refreshReadouts();
+  }
+  document.getElementById('btn-lang').onclick = () => applyLang(lang === 'en' ? 'zh' : 'en');
+
   applyFs();
-  document.getElementById('btn-bigger').onclick  = () => { fs = Math.min(26, fs+1); applyFs(); };
-  document.getElementById('btn-smaller').onclick = () => { fs = Math.max(13, fs-1); applyFs(); };
-  document.getElementById('btn-print').onclick   = () => window.print();
+  applyLang(lang);
+  addEventListener('resize', refreshReadouts);
 
   // 阅读进度 + 目录高亮 + 记住滚动位置
   const prog = document.getElementById('prog');
@@ -1288,6 +1481,7 @@ document.addEventListener('DOMContentLoaded', () => {
       sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
       sel.dispatchEvent(new Event('change'));
     }
+    else if (e.key === 'l') document.getElementById('btn-lang').click();
     else if (e.key === 'g') scrollTo({top:0, behavior:'smooth'});
     else if (e.key === 'G') scrollTo({top:document.body.scrollHeight, behavior:'smooth'});
   });
@@ -1315,7 +1509,7 @@ WATCH_JS = r"""
 # --------------------------------------------------------------------------
 
 def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
-               style: str = "paper") -> str:
+               style: str = "paper", lang: str = "en") -> str:
     raw = md_path.read_bytes()
     for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
         try:
@@ -1367,18 +1561,18 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
             f'{html.escape(h["text"])}</a>'
             for h in toc
         )
-        toc_html = f'<nav id="toc"><p class="ttl">目录</p>{items}</nav>'
+        toc_html = f'<nav id="toc"><p class="ttl">{UI[lang]["toc_head"]}</p>{items}</nav>'
 
     name = html.escape(md_path.name)
 
     style_opts = "".join(
-        f'<option value="{k}"{" selected" if k == style else ""}>{v}</option>'
+        f'<option value="{k}"{" selected" if k == style else ""}>{v[lang]}</option>'
         for k, v in STYLES.items()
     )
 
     return f"""<!DOCTYPE html>
 <!-- generated by quietmd — https://github.com/chenzhan4321/quietmd -->
-<html lang="zh" data-style="{style}">
+<html lang="{lang}" data-style="{style}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1387,21 +1581,30 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 <style>{pygments_css()}</style>
 <style>{STYLE_CSS}</style>
 <script type="application/json" id="style-list">{json.dumps(STYLES, ensure_ascii=False)}</script>
+<script type="application/json" id="i18n">{json.dumps(UI, ensure_ascii=False)}</script>
 </head>
 <body>
 <div id="prog"></div>
 <div id="bar">
-  <span class="name">{name}</span>
-  <span style="color:var(--fg-dim);opacity:.5">·</span>
-  <button id="btn-toc" title="显示 / 收起目录 (h)">目录</button>
+  <button id="btn-toc" class="ico">{ICONS["sidebar"]}</button>
+  <span class="fname">{name}</span>
   <span class="sp"></span>
-  <span class="sel hide-sm"><select id="sel-style" title="排版风格 (s 循环切换)">{style_opts}</select></span>
-  <button id="btn-narrower" class="hide-sm" title="收窄页面 ([)">宽−</button>
-  <button id="btn-wider" class="hide-sm" title="加宽页面 (])">宽+</button>
-  <button id="btn-smaller" title="缩小字号">A−</button>
-  <button id="btn-bigger" title="放大字号">A+</button>
-  <button id="btn-theme" title="切换明暗 (t)">◐</button>
-  <button id="btn-print" title="打印 / 存 PDF">⎙</button>
+  <span class="grp hide-xs"><span class="sel"><select id="sel-style">{style_opts}</select></span></span>
+  <span class="grp hide-sm">
+    <button id="btn-narrower">−</button>
+    <span class="val" id="val-measure">—</span>
+    <button id="btn-wider">+</button>
+  </span>
+  <span class="grp">
+    <button id="btn-smaller">−</button>
+    <span class="val" id="val-size">—</span>
+    <button id="btn-bigger">+</button>
+  </span>
+  <span class="grp">
+    <button id="btn-theme" class="ico">{ICONS["theme"]}</button>
+    <button id="btn-print" class="ico hide-xs">{ICONS["print"]}</button>
+  </span>
+  <span class="grp"><button id="btn-lang">中文</button></span>
 </div>
 <div id="wrap">
 {toc_html}
@@ -1422,7 +1625,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 # --------------------------------------------------------------------------
 
 def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
-          style: str = "paper") -> None:
+          style: str = "paper", lang: str = "en") -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -1438,7 +1641,7 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
                 self._send(stamp.encode(), "text/plain")
                 return
             try:
-                page = build_html(md_path, mathjax_js, watch=True, style=style)
+                page = build_html(md_path, mathjax_js, watch=True, style=style, lang=lang)
             except Exception as e:  # 渲染出错也要看得见，而不是白屏
                 page = (f"<pre style='font:14px monospace;padding:2rem;color:#c0392b'>"
                         f"{html.escape(repr(e))}</pre>")
@@ -1516,7 +1719,7 @@ def check(md_path: Path, mathjax_js: str) -> int:
               "装一个，或用 CHROME=/path/to/chrome 指定。", file=sys.stderr)
         return 2
 
-    page = build_html(md_path, mathjax_js, watch=False)
+    page = build_html(md_path, mathjax_js, watch=False, lang="en")
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / "check.html"
         tmp.write_text(page, encoding="utf-8")
@@ -1541,19 +1744,27 @@ def check(md_path: Path, mathjax_js: str) -> int:
         return [" ".join(html.unescape(x).split()) for x in
                 re.findall(r'class="mjx-\w+ ' + cls + r'" data-tex="([^"]*)"', out)]
 
-    print(f"{md_path.name}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
-    for label, items in (("排不出来", collect("mjx-failed")),
-                         ("不认识的命令", collect("mjx-warn"))):
+    zh = cli_lang() == "zh"
+    if zh:
+        print(f"{md_path.name}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
+        labels = ("排不出来", "不认识的命令")
+    else:
+        print(f"{md_path.name}: {total} formulas, {failed} won't render, "
+              f"{warned} with unknown commands")
+        labels = ("won't render", "unknown command")
+    for label, items in zip(labels, (collect("mjx-failed"), collect("mjx-warn"))):
         for i, tex in enumerate(items, 1):
             print(f"  [{label}] {i}. {tex[:110]}{'…' if len(tex) > 110 else ''}")
     if not failed and not warned:
-        print("  全部正常。")
+        print("  全部正常。" if zh else "  All good.")
     return 1 if (failed or warned) else 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="quietmd", description="把数学公式放在第一位的 Markdown 阅读器")
+        prog="quietmd",
+        description="A quiet Markdown reader for documents with math "
+                    "/ 安静地读带公式的 Markdown")
     ap.add_argument("file", help="要看的 .md 文件")
     ap.add_argument("-w", "--watch", action="store_true", help="实时预览：存盘即刷新")
     ap.add_argument("-o", "--out", help="输出 HTML 路径（不打开浏览器）")
@@ -1562,8 +1773,11 @@ def main() -> int:
     ap.add_argument("-c", "--check", action="store_true",
                     help="只检查：真跑一遍 MathJax，列出渲染不出来的公式（全部正常则退出码 0）")
     ap.add_argument("-s", "--style", default="paper", choices=list(STYLES),
-                    help="初始排版风格：" + "；".join(f"{k}={v}" for k, v in STYLES.items())
-                         + "（页面里按 s 可随时切换）")
+                    help="initial typographic style: "
+                         + ", ".join(f"{k}={v['en']}" for k, v in STYLES.items())
+                         + " (press s in the page to cycle)")
+    ap.add_argument("--lang", default="en", choices=["en", "zh"],
+                    help="initial interface language (a button in the page switches it)")
     args = ap.parse_args()
 
     md_path = Path(args.file).expanduser().resolve()
@@ -1577,10 +1791,10 @@ def main() -> int:
 
     if args.watch:
         serve(md_path, mathjax_js, args.port, open_browser=not args.no_open,
-              style=args.style)
+              style=args.style, lang=args.lang)
         return 0
 
-    page = build_html(md_path, mathjax_js, watch=False, style=args.style)
+    page = build_html(md_path, mathjax_js, watch=False, style=args.style, lang=args.lang)
     if args.out:
         out = Path(args.out).expanduser().resolve()
     else:
