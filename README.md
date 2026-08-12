@@ -4,6 +4,11 @@
 </h1>
 
 <p align="center">
+  <a href="https://github.com/chenzhan4321/quietmd/actions/workflows/verify.yml"><img src="https://github.com/chenzhan4321/quietmd/actions/workflows/verify.yml/badge.svg" alt="verify"></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+</p>
+
+<p align="center">
   A quiet Markdown reader for documents with math.<br>
   Renders to one self-contained HTML file, works fully offline,<br>
   and <b>tells you when a formula didn't come out right</b>.
