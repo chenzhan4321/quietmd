@@ -94,6 +94,18 @@ skipped — those are usually notes to the author rather than the text. Use
 `--exclude 'full_*.md'` to skip anything else; the file list is always printed, because
 a directory that also holds a generated merge would otherwise count everything twice.
 
+## Straight to PDF
+
+```console
+$ quietmd drafts/ --pdf -s book
+drafts.pdf  (73 pages, 4.2 MB, book layout)
+```
+
+No LaTeX, no print dialog. The style you pick *is* the page design, so the same source
+gives you a LaTeX-looking article, a book, or a double-spaced typescript to mark up.
+Toolbar, sidebar and the corner note are left out, headings don't get stranded at the foot
+of a page, and the page is white — a style's background colour is a screen thing.
+
 ## Styles
 
 Eight, all embedded in the page — pick from the dropdown or press `s`. Each is modelled on

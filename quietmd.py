@@ -838,7 +838,16 @@ mjx-container svg a{color:var(--accent)}
 
 /* ---------- 打印 ---------- */
 @media print{
-  :root{--bg:#fff;--fg:#000;--fs:11pt}
+  /* 纸上一律白底深字：风格的底色（book 的米黄、tufte 的 #fffff8）在屏幕上是它们的
+     标志，印出来却是满页油墨、还压低了文字对比度。字体、行宽、缩进这些版式照旧。
+     要 !important 是因为风格的选择器带属性、特异性压得过 :root。 */
+  html, html[data-style]{
+    --bg:#fff !important; --bg-soft:#f4f4f4 !important;
+    --fg:#111 !important; --fg-dim:#555 !important;
+    --code-bg:#f4f4f4 !important; --accent-soft:#eee !important;
+    --fs:11pt;
+  }
+  article{padding-top:0 !important}   /* 首页不要空出四分之一版 */
   #bar,#toc,#prog,#mjerr{display:none !important}
   #wrap{padding-top:0} main{padding:0} article{max-width:none}
   article h1,article h2,article h3{break-after:avoid}
@@ -1991,6 +2000,56 @@ def check(md_path: Path, mathjax_js: str, joined: str | None = None) -> int:
     return 1 if problems else 0
 
 
+
+def to_pdf(md_path: Path, mathjax_js: str, out: Path, style: str, lang: str,
+           text: str | None = None) -> int:
+    """直接出 PDF，不用去点浏览器的打印菜单。
+
+    走的还是那份打印样式表：工具栏、侧栏、进度条、角落的提示都不会印上去，
+    标题不与正文分家，公式和表格不跨页断开。八种风格就是八种版式。
+    """
+    import subprocess
+    import tempfile
+
+    zh = cli_lang() == "zh"
+    chrome = find_chrome()
+    if not chrome:
+        print("找不到 Chrome/Chromium，--pdf 需要它来排版。\n"
+              "装一个，或用 CHROME=/path/to/chrome 指定。" if zh else
+              "No Chrome/Chromium found; --pdf needs one to lay the pages out.\n"
+              "Install one, or point at it with CHROME=/path/to/chrome.", file=sys.stderr)
+        return 2
+
+    page = build_html(md_path, mathjax_js, watch=False, style=style, lang=lang, text=text)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "print.html"
+        tmp.write_text(page, encoding="utf-8")
+        try:
+            r = subprocess.run(
+                [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+                 # 公式多的稿子 MathJax 要跑好几秒，排版前必须等它排完
+                 "--virtual-time-budget=120000",
+                 "--run-all-compositor-stages-before-draw",
+                 "--no-pdf-header-footer",
+                 f"--print-to-pdf={out}", tmp.as_uri()],
+                capture_output=True, text=True, timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            print("排版超时。" if zh else "Laying out the PDF timed out.", file=sys.stderr)
+            return 2
+
+    if not out.is_file() or out.stat().st_size < 1000:
+        print((r.stderr or "").strip()[:400], file=sys.stderr)
+        print("没能生成 PDF。" if zh else "The PDF wasn't produced.", file=sys.stderr)
+        return 2
+
+    pages = len(re.findall(rb"/Type\s*/Page[^s]", out.read_bytes()))
+    size = out.stat().st_size / 1024 / 1024
+    print(f"{out}  （{pages} 页，{size:.1f} MB，{style} 版式）" if zh else
+          f"{out}  ({pages} pages, {size:.1f} MB, {style} layout)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="quietmd",
@@ -2009,6 +2068,9 @@ def main() -> int:
                          + " (press s in the page to cycle)")
     ap.add_argument("-V", "--version", action="version",
                     version=f"quietmd {__version__}")
+    ap.add_argument("--pdf", nargs="?", const="", metavar="OUT",
+                    help="lay it out as a PDF instead of opening a browser "
+                         "(the style you pick is the page design)")
     ap.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                     help="when reading a directory, skip files matching this "
                          "(repeatable, e.g. --exclude 'full_*.md')")
@@ -2037,6 +2099,11 @@ def main() -> int:
 
     if args.check:
         return check(md_path, mathjax_js, joined)
+
+    if args.pdf is not None:
+        out = Path(args.pdf).expanduser().resolve() if args.pdf else \
+            default_out(md_path).with_suffix(".pdf")
+        return to_pdf(md_path, mathjax_js, out, args.style, args.lang, joined)
 
     if args.watch:
         serve(md_path, mathjax_js, args.port, open_browser=not args.no_open,
