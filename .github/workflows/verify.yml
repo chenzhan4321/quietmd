@@ -35,6 +35,14 @@ jobs:
           ./uninstall.sh
           test ! -e "$HOME/.local/bin/quietmd"
 
+      - name: the manuscript audit catches dangling refs, duplicate labels, unused macros
+        run: |
+          out=$(uv run --quiet --script quietmd.py tests/manuscript_issues.md --check || true)
+          echo "$out"
+          echo "$out" | grep -q 'eq:missing'   # dangling reference
+          echo "$out" | grep -q 'eq:dup'       # duplicate label
+          echo "$out" | grep -q 'NeverUsed'    # macro defined but never used
+
       - name: --check should flag exactly the deliberately broken formula
         run: |
           set +e

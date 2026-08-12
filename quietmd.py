@@ -1743,6 +1743,68 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
         print("\n再见。")
 
 
+
+# --------------------------------------------------------------------------
+# 7b. 稿件体检
+#
+# --check 原本只回答一个问题：这条公式能不能渲染出来。但论文作者真正会踩的坑
+# 有几个是渲染得好好的、却是错的 —— \eqref 指向一个不存在的 \label，MathJax
+# 只会安静地显示成 ???；同一个 \label 写了两遍，编号从此就错了。
+#
+# 这些是纯静态的关系，公式文本已经在手上，不需要浏览器 —— 所以没装 Chrome 的
+# 机器也能做这部分检查。
+# --------------------------------------------------------------------------
+
+LABEL_RE = re.compile(r"\\label\{([^}\n]{1,120})\}")
+REF_RE = re.compile(r"\\(?:eq)?ref\{([^}\n]{1,120})\}")
+# \newcommand{\foo} / \newcommand\foo / \renewcommand / \def / \DeclareMathOperator
+DEF_RE = re.compile(
+    r"\\(?:re)?newcommand\s*\{?\\([A-Za-z@]+)\}?"
+    r"|\\def\s*\\([A-Za-z@]+)"
+    r"|\\DeclareMathOperator\*?\s*\{?\\([A-Za-z@]+)\}?"
+)
+
+
+def audit_manuscript(math: list[dict]) -> list[tuple[str, str]]:
+    """交叉比对标签与宏，返回 [(类别, 说明)]。类别用于分类打印。"""
+    blob = "\n".join(m["tex"] for m in math)
+
+    labels: dict[str, int] = {}
+    for name in LABEL_RE.findall(blob):
+        labels[name] = labels.get(name, 0) + 1
+    refs: dict[str, int] = {}
+    for name in REF_RE.findall(blob):
+        refs[name] = refs.get(name, 0) + 1
+
+    defs: dict[str, int] = {}
+    for groups in DEF_RE.findall(blob):
+        name = next(g for g in groups if g)
+        defs[name] = defs.get(name, 0) + 1
+
+    found: list[tuple[str, str]] = []
+
+    for name in sorted(r for r in refs if r not in labels):
+        found.append(("dangling-ref", f"\\eqref{{{name}}} → 找不到对应的 \\label"))
+    for name, n in sorted(labels.items()):
+        if n > 1:
+            found.append(("duplicate-label", f"\\label{{{name}}} 出现了 {n} 次，编号会错"))
+    for name, n_def in sorted(defs.items()):
+        # 定义语句本身也含一次 \name，所以出现次数要减掉定义数才是真正的使用
+        uses = len(re.findall(r"\\" + re.escape(name) + r"(?![A-Za-z])", blob)) - n_def
+        if uses <= 0:
+            found.append(("unused-macro", f"\\{name} 定义了但从未使用"))
+        if n_def > 1:
+            found.append(("redefined-macro", f"\\{name} 被定义了 {n_def} 次"))
+    return found
+
+
+AUDIT_LABELS = {
+    "en": {"dangling-ref": "dangling reference", "duplicate-label": "duplicate label",
+           "unused-macro": "unused macro", "redefined-macro": "macro redefined"},
+    "zh": {"dangling-ref": "悬空引用", "duplicate-label": "重复的 label",
+           "unused-macro": "未使用的宏", "redefined-macro": "重复定义的宏"},
+}
+
 CHROME_CANDIDATES = [
     # macOS
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -1782,21 +1844,47 @@ def find_chrome() -> str | None:
 
 
 def check(md_path: Path, mathjax_js: str) -> int:
-    """真跑一遍 MathJax，把渲染不出来的公式列出来。
+    """稿件体检 + 渲染检查。
 
-    不是静态扫描 —— 是用无头浏览器实际渲染，然后逐条核对每个公式槽里有没有
-    长出 mjx-container。退出码 0 表示全部渲染成功，可以直接用在脚本里。
+    两段独立：
+      1. 静态体检 —— 标签与宏的交叉比对，纯文本分析，不需要浏览器。
+      2. 渲染检查 —— 用无头浏览器真跑一遍 MathJax，逐条核对有没有排出来。
+    没装 Chrome 时第 2 段跳过，第 1 段照做。
+    退出码 0 表示两段都干净，可以直接进脚本。
     """
     import subprocess
     import tempfile
 
+    zh = cli_lang() == "zh"
+    raw = md_path.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    _, math, _ = MathLocker(split_front_matter(text)[1]).run()
+
+    problems = 0
+
+    # ---- 1. 静态体检 --------------------------------------------------
+    issues = audit_manuscript(math)
+    if issues:
+        problems += len(issues)
+        names = AUDIT_LABELS["zh" if zh else "en"]
+        for kind, msg in issues:
+            print(f"  [{names[kind]}] {msg}")
+
+    # ---- 2. 渲染检查 --------------------------------------------------
     chrome = find_chrome()
     if not chrome:
-        print("找不到 Chrome/Chromium，--check 需要它来真跑一遍 MathJax。\n"
-              "装一个，或用 CHROME=/path/to/chrome 指定。", file=sys.stderr)
-        return 2
+        print(f"{md_path.name}：{len(math)} 处公式；"
+              "没找到 Chrome/Chromium，跳过渲染检查（静态体检已完成）。" if zh else
+              f"{md_path.name}: {len(math)} formulas; no Chrome/Chromium found, "
+              "skipped the render check (static audit done).", file=sys.stderr)
+        return 1 if problems else 0
 
-    page = build_html(md_path, mathjax_js, watch=False, lang="en")
+    page = build_html(md_path, mathjax_js, watch=False)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / "check.html"
         tmp.write_text(page, encoding="utf-8")
@@ -1805,23 +1893,25 @@ def check(md_path: Path, mathjax_js: str) -> int:
                 [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
                  "--window-size=1400,900", "--virtual-time-budget=45000",
                  "--dump-dom", tmp.as_uri()],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True, text=True, timeout=300,
             ).stdout
         except subprocess.TimeoutExpired:
-            print("渲染超时。", file=sys.stderr)
+            print("渲染超时。" if zh else "Rendering timed out.", file=sys.stderr)
             return 2
 
     m = re.search(r'data-math-total="(\d+)" data-math-failed="(\d+)" data-math-warn="(\d+)"', out)
     if not m:
-        print("没能读到渲染结果（页面可能没跑完 MathJax）。", file=sys.stderr)
+        print("没能读到渲染结果（页面可能没跑完 MathJax）。" if zh else
+              "Couldn't read the render result (MathJax may not have finished).",
+              file=sys.stderr)
         return 2
     total, failed, warned = (int(m.group(i)) for i in (1, 2, 3))
+    problems += failed + warned
 
     def collect(cls):
         return [" ".join(html.unescape(x).split()) for x in
                 re.findall(r'class="mjx-\w+ ' + cls + r'" data-tex="([^"]*)"', out)]
 
-    zh = cli_lang() == "zh"
     if zh:
         print(f"{md_path.name}：{total} 处公式，{failed} 处排不出来，{warned} 处含不认识的命令")
         labels = ("排不出来", "不认识的命令")
@@ -1832,9 +1922,9 @@ def check(md_path: Path, mathjax_js: str) -> int:
     for label, items in zip(labels, (collect("mjx-failed"), collect("mjx-warn"))):
         for i, tex in enumerate(items, 1):
             print(f"  [{label}] {i}. {tex[:110]}{'…' if len(tex) > 110 else ''}")
-    if not failed and not warned:
+    if not problems:
         print("  全部正常。" if zh else "  All good.")
-    return 1 if (failed or warned) else 0
+    return 1 if problems else 0
 
 
 def main() -> int:

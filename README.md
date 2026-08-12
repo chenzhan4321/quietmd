@@ -63,6 +63,18 @@ paper.md: 2270 formulas, 0 won't render, 0 with unknown commands
 ```
 
 Exit code is 0 only when everything rendered, so it fits in a script.
+It also cross-checks the manuscript itself, which needs no browser at all:
+
+```console
+$ quietmd paper.md --check
+  [dangling reference] \eqref{eq:missing} → no matching \label
+  [duplicate label] \label{eq:dup} appears 2 times, numbering will be wrong
+  [unused macro] \NeverUsed defined but never used
+```
+
+A `\eqref` pointing at a label that doesn't exist renders as `???` and is easy to scroll
+past; a label written twice silently breaks the numbering from there on.
+
 
 ## Styles
 
