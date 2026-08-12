@@ -1985,8 +1985,13 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
                                               quote=False) + r"\)", esc)
 
         # 按「章 + 它下面的小节」分组，章级带折叠开关。
-        # 章级 = 目录里出现的最浅那一层，因为有的文档从 # 起、有的从 ## 起。
-        top = min(h["level"] for h in toc)
+        # 章级取「第一个出现至少两次的层级」：书名那种只出现一次的最浅标题
+        # 不是章 —— 把它当章的话，折一下整本书的目录就全没了。
+        counts: dict[int, int] = {}
+        for h in toc:
+            counts[h["level"]] = counts.get(h["level"], 0) + 1
+        levels = sorted(counts)
+        top = next((lv for lv in levels if counts[lv] >= 2), levels[0])
         chunks: list[str] = []
         i = 0
         while i < len(toc):
