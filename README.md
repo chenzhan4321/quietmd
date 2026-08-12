@@ -94,6 +94,11 @@ It searches body text, headings **and the LaTeX source of every formula**. Type 
 and it jumps to that equation — `2` finds equation (2) even when it lives inside an
 `align` block that carries several numbers. `↑`/`↓` and `Enter` to move and go.
 
+A contents list written into the document itself becomes clickable: entries under a
+heading called *Contents* (or 目录) that match a heading in the document are linked to it,
+whether they're a bullet list or one line per paragraph. Entries that match nothing are
+left as plain text. `[TOC]` on its own line expands into a full linked contents list.
+
 ## A directory as one book
 
 A run of numbered files usually *is* one thing — chapters of a book, sections of a paper.

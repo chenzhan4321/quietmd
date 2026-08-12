@@ -470,6 +470,96 @@ def render_markdown(src: str, md, math: list[dict], nonce: str) -> tuple[str, li
     return body, toc
 
 
+
+# 正文里那个「目录」小节的标题写法（中英日常见叫法）
+TOC_HEADS = ("目录", "contents", "table of contents", "toc", "目次", "もくじ")
+
+
+def link_body_toc(body: str, toc: list[dict]) -> str:
+    """把正文里手写的目录变成能点的链接，以及把 [TOC] 展开成完整目录。
+
+    只在两种明确的地方动手：
+      1. 标题叫「目录 / Contents」的那一节里的列表项；
+      2. 单独成段的 [TOC] / [[toc]] 占位符。
+    列表项的文字要能对上某个标题才会加链接 —— 对不上就原样留着，
+    宁可少链一条，也不要把正文里的普通句子变成链接。
+    """
+    if not toc:
+        return body
+
+    def norm(x: str) -> str:
+        x = re.sub(r"<[^>]+>", "", x)
+        return re.sub(r"\s+", " ", html.unescape(x)).strip().lower()
+
+    by_text = {}
+    for h in toc:
+        by_text.setdefault(norm(h["text"]), h["id"])
+
+    def linkify(m):
+        inner = m.group(1)
+        if "<a " in inner:            # 本来就是链接，别套两层
+            return m.group(0)
+        hid = by_text.get(norm(inner))
+        return f'<li><a href="#{hid}">{inner}</a></li>' if hid else m.group(0)
+
+    # ---- 1. 「目录」小节里的列表 ----
+    def do_section(m):
+        head, rest = m.group(0), m.group(3)
+        return m.group(1) + m.group(2) + re.sub(r"<li>(.*?)</li>", linkify, rest, flags=re.S)
+
+    def link_line(text: str) -> str:
+        """一行文字：对得上某个标题就变链接，对不上原样返回。"""
+        if "<a " in text:
+            return text
+        hid = by_text.get(norm(text))
+        return f'<a href="#{hid}">{text}</a>' if hid else text
+
+    def link_para(m):
+        """目录也常写成一段（每行一个标题，靠 <br> 或分段隔开）而不是列表。
+        逐行匹配，一行都对不上就整段不动。"""
+        inner = m.group(1)
+        if "<a " in inner:
+            return m.group(0)
+        parts = re.split(r"(<br\s*/?>)", inner)
+        out, hit = [], False
+        for part in parts:
+            if re.fullmatch(r"<br\s*/?>", part):
+                out.append(part)
+                continue
+            linked = link_line(part.strip())
+            hit = hit or linked != part.strip()
+            out.append(linked)
+        return f"<p>{''.join(out)}</p>" if hit else m.group(0)
+
+    def do_toc_section(m):
+        rest = m.group(3)
+        rest = re.sub(r"<li>(.*?)</li>", linkify, rest, flags=re.S)
+        rest = re.sub(r"<p>(.*?)</p>", link_para, rest, flags=re.S)
+        return m.group(1) + rest
+
+    body = re.sub(
+        r"(<h([1-6])[^>]*>\s*(?:" + "|".join(map(re.escape, TOC_HEADS)) + r")\s*</h\2>)"
+        r"((?:(?!<h[1-6][ >]).)*)",
+        lambda m: m.group(1) + re.sub(
+            r"<p>(.*?)</p>",
+            link_para,
+            re.sub(r"<li>(.*?)</li>", linkify, m.group(3), flags=re.S),
+            flags=re.S),
+        body, flags=re.S | re.I)
+
+    # ---- 2. [TOC] 占位符 ----
+    if re.search(r"<p>\s*\[\[?toc\]?\]\s*</p>", body, re.I):
+        top = min(h["level"] for h in toc)
+        items = "".join(
+            f'<li class="toc-l{h["level"] - top}">'
+            f'<a href="#{h["id"]}">{html.escape(h["text"])}</a></li>'
+            for h in toc
+        )
+        body = re.sub(r"<p>\s*\[\[?toc\]?\]\s*</p>",
+                      f'<nav class="doc-toc"><ul>{items}</ul></nav>', body, flags=re.I)
+    return body
+
+
 def restore_math(body: str, math: list[dict], nonce: str) -> str:
     """把占位符换回公式。统一输出成 \\( \\) / \\[ \\] / 裸环境 三种形式，
     MathJax 只需认这三种，$ 完全不参与扫描 —— 所以 $100 永远不会被误渲染。"""
@@ -785,6 +875,15 @@ article pre{background:var(--code-bg); border:1px solid var(--rule); border-radi
   padding:.95em 1.1em; overflow-x:auto; margin:1.6em 0; line-height:1.55}
 article pre code{background:none; padding:0; font-size:.82em}
 pre.highlight{background:var(--code-bg)}
+
+/* 正文里用 [TOC] 生成的目录 */
+.doc-toc ul{list-style:none; padding-left:0; margin:1.4em 0}
+.doc-toc li{margin:.18em 0}
+.doc-toc a{border-bottom:0}
+.doc-toc a:hover{border-bottom:1px solid var(--accent)}
+.doc-toc .toc-l1{padding-left:1.4em; font-size:.95em}
+.doc-toc .toc-l2{padding-left:2.8em; font-size:.9em; color:var(--fg-dim)}
+.doc-toc .toc-l3{padding-left:4.2em; font-size:.88em; color:var(--fg-dim)}
 
 /* 脚注 */
 .footnotes{margin-top:3.5em; padding-top:1.2em; border-top:1px solid var(--rule);
@@ -1938,6 +2037,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 
     # ③ 原样放回
     body = restore_math(body, math, nonce)
+    body = link_body_toc(body, toc)
     body, imgs_skipped = inline_assets(
         body, md_path if md_path.is_dir() else md_path.parent)
     if imgs_skipped:
