@@ -76,6 +76,17 @@ A `\eqref` pointing at a label that doesn't exist renders as `???` and is easy t
 past; a label written twice silently breaks the numbering from there on.
 
 
+## Finding things
+
+`⌘F` can't find formulas — they're SVG, and in a book with a couple of thousand of them
+"where was that expression with sigma_i" has no answer. Press `/` or `⌘K`:
+
+<p align="center"><img src="docs/find.png" width="700" alt=""></p>
+
+It searches body text, headings **and the LaTeX source of every formula**. Type a number
+and it jumps to that equation — `2` finds equation (2) even when it lives inside an
+`align` block that carries several numbers. `↑`/`↓` and `Enter` to move and go.
+
 ## A directory as one book
 
 A run of numbered files usually *is* one thing — chapters of a book, sections of a paper.

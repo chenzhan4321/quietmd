@@ -836,6 +836,52 @@ mjx-container svg a{color:var(--accent)}
   padding:.4rem .8rem; border-radius:999px; opacity:0; transition:opacity .18s;
   pointer-events:none}
 
+/* ---------- 查找面板 ----------
+   浏览器原生的 ⌘F 只认文本，公式是 SVG，搜不到 —— 读一本 2270 条公式的书时
+   「那个带 sigma_i 的式子在哪」根本没法找。这个面板同时搜正文、标题和公式的
+   LaTeX 源码，也认公式编号（输入 47 就能跳到式 (47)）。 */
+#find{
+  position:fixed; inset:0; z-index:80; display:none;
+  background:rgba(0,0,0,.18); backdrop-filter:blur(2px);
+}
+#find.show{display:block}
+#find .panel{
+  position:absolute; left:50%; top:9vh; transform:translateX(-50%);
+  width:min(680px, 92vw); max-height:74vh; display:flex; flex-direction:column;
+  background:var(--bg); border:1px solid var(--rule); border-radius:12px;
+  box-shadow:0 18px 60px rgba(0,0,0,.28); overflow:hidden;
+  font-family:var(--sans);
+}
+#find .top{display:flex; align-items:center; gap:.6rem; padding:.7rem .9rem;
+  border-bottom:1px solid var(--rule)}
+#find input{
+  flex:1; font:inherit; font-size:14.5px; color:var(--fg); background:transparent;
+  border:0; outline:0; padding:.15rem 0;
+}
+#find input::placeholder{color:var(--fg-dim); opacity:.75}
+#find .count{font-size:11.5px; color:var(--fg-dim); font-variant-numeric:tabular-nums;
+  white-space:nowrap}
+#find .hits{list-style:none; margin:0; padding:.3rem; overflow-y:auto}
+#find .hits li{
+  display:flex; gap:.6rem; align-items:baseline; padding:.42rem .6rem;
+  border-radius:7px; cursor:pointer; font-size:12.5px; line-height:1.5;
+}
+#find .hits li:hover{background:var(--bg-soft)}
+#find .hits li[aria-selected="true"]{background:var(--accent-soft)}
+#find .kind{
+  flex:0 0 auto; font-size:9.5px; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--fg-dim); border:1px solid var(--rule); border-radius:4px;
+  padding:.08rem .3rem; margin-top:.1rem;
+}
+#find .snip{flex:1; min-width:0; color:var(--fg);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#find .snip.tex{font-family:var(--mono); font-size:11.5px; color:var(--fg-dim)}
+#find .snip b{color:var(--accent); font-weight:600}
+#find .eqno{flex:0 0 auto; font-variant-numeric:tabular-nums; color:var(--accent);
+  font-size:11.5px}
+#find .empty{padding:1.4rem .9rem; color:var(--fg-dim); font-size:12.5px; text-align:center}
+@media print{ #find{display:none !important} }
+
 /* ---------- 打印 ---------- */
 @media print{
   /* 纸上一律白底深字：风格的底色（book 的米黄、tufte 的 #fffff8）在屏幕上是它们的
@@ -896,6 +942,9 @@ UI = {
                      "\"unknown command\" is usually a typo or a macro from a package "
                      "you don't have (the rest of the formula still renders).",
         "err_close": "Dismiss", "err_nth": "#{i} of {n}: ",
+        "find_ph": "Find in text, headings, or LaTeX source — a number jumps to that equation",
+        "find_h": "heading", "find_t": "text", "find_m": "formula",
+        "find_none": "Nothing found.",
         "console_dead": "[quietmd] these formulas won't render:",
         "console_warn": "[quietmd] these formulas contain unknown commands:",
     },
@@ -914,6 +963,9 @@ UI = {
         "err_title": "排不出来通常是括号没配对；不认识的命令多半是拼错了，"
                      "或者用了需要额外宏包的写法（公式其余部分照常渲染）",
         "err_close": "关掉这个提示", "err_nth": "第 {i}/{n} 处：",
+        "find_ph": "搜正文、标题或 LaTeX 源码 —— 输入数字跳到该编号的公式",
+        "find_h": "标题", "find_t": "正文", "find_m": "公式",
+        "find_none": "没找到。",
         "console_dead": "[quietmd] 这些公式排不出来：",
         "console_warn": "[quietmd] 这些公式里有不认识的命令：",
     },
@@ -1566,7 +1618,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (head) head.textContent = t('toc_head');
     [...styleSel.options].forEach(o => { o.textContent = STYLES[o.value][lang]; });
     styleSel.value = root.dataset.style || 'paper';
-    if (window.__quietmdBad) renderBanner();
+    // renderBanner 只在文档真的有问题公式时才定义 —— 干净的文档里它不存在，
+    // 直接调用会抛 ReferenceError，把后面的初始化（包括键盘绑定）全带停。
+    if (typeof renderBanner === 'function') renderBanner();
+    const fq = document.getElementById('find-q');
+    if (fq) fq.placeholder = t('find_ph');
     refreshReadouts();
   }
   document.getElementById('btn-lang').onclick = () => applyLang(lang === 'en' ? 'zh' : 'en');
@@ -1574,6 +1630,120 @@ document.addEventListener('DOMContentLoaded', () => {
   applyFs();
   applyLang(lang);
   addEventListener('resize', refreshReadouts);
+
+
+  // ---- 查找：正文 / 标题 / 公式源码 / 公式编号 ----------------------
+  // 建索引放在 MathJax 跑完之后（公式编号那时才存在），所以挂在 mathReady 上。
+  const findBox = document.getElementById('find');
+  const findQ = document.getElementById('find-q');
+  const findR = document.getElementById('find-r');
+  const findN = document.getElementById('find-n');
+  let index = [], hits = [], cursor = 0;
+
+  function buildIndex() {
+    index = [];
+    const art = document.querySelector('article');
+    art.querySelectorAll('h1, h2, h3, h4').forEach(el =>
+      index.push({kind: 'h', text: el.textContent.trim(), el}));
+    art.querySelectorAll('p, li, blockquote, td, th').forEach(el => {
+      // 只取直接文本，避免同一段被父子元素重复收录
+      const t = el.textContent.trim();
+      if (t && t.length > 1 && !el.querySelector('p, li')) index.push({kind: 't', text: t, el});
+    });
+    art.querySelectorAll('.mjx-inline, .mjx-block').forEach(el => {
+      const tex = (el.dataset.tex || '').trim();
+      if (!tex) return;
+      // 公式编号：MathJax 给带 \label 的式子挂了 mjx-eqn 锚点，顺带取出来，
+      // 这样输入 47 就能跳到式 (47)
+      const c = el.querySelector('mjx-container');
+      // 编号在 container 文本里，而 align 这类环境一个容器带好几个编号，
+      // 所以全都收下 —— 输入 2 也该跳到 align 里的第 (2) 式
+      const nums = c && c.querySelector('[id^="mjx-eqn"]')
+        ? [...c.textContent.matchAll(/\((\d+)\)/g)].map(m => m[1]) : [];
+      index.push({kind: 'm', text: tex, el, nums, num: nums[0]});
+    });
+  }
+
+  function escapeHtml(x) {
+    return x.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  }
+  function snippet(text, q, max) {
+    const i = text.toLowerCase().indexOf(q);
+    if (i < 0) return escapeHtml(text.slice(0, max));
+    const from = Math.max(0, i - Math.floor(max / 3));
+    const cut = text.slice(from, from + max);
+    const j = cut.toLowerCase().indexOf(q);
+    return (from ? '…' : '') + escapeHtml(cut.slice(0, j))
+      + '<b>' + escapeHtml(cut.slice(j, j + q.length)) + '</b>'
+      + escapeHtml(cut.slice(j + q.length));
+  }
+
+  function runFind() {
+    const raw = findQ.value.trim();
+    const q = raw.toLowerCase();
+    findR.innerHTML = '';
+    hits = [];
+    if (!q) { findN.textContent = ''; return; }
+    const isNum = /^\(?\d+\)?$/.test(raw);
+    const wanted = raw.replace(/[()]/g, '');
+    for (const it of index) {
+      if (isNum && it.kind === 'm' && (it.nums || []).includes(wanted)) hits.unshift(it);
+      else if (it.text.toLowerCase().includes(q)) hits.push(it);
+      if (hits.length > 400) break;
+    }
+    findN.textContent = hits.length > 400 ? '400+' : String(hits.length);
+    const label = {h: t('find_h'), t: t('find_t'), m: t('find_m')};
+    hits.slice(0, 60).forEach((it, i) => {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.innerHTML = `<span class="kind">${label[it.kind]}</span>`
+        + (it.nums && it.nums.length
+             ? `<span class="eqno">(${it.nums.join(') (')})</span>` : '')
+        + `<span class="snip${it.kind === 'm' ? ' tex' : ''}">${snippet(it.text, q, 150)}</span>`;
+      li.onclick = () => gotoHit(i);
+      findR.appendChild(li);
+    });
+    if (!hits.length) {
+      findR.innerHTML = `<li class="empty">${t('find_none')}</li>`;
+    }
+    cursor = 0; markCursor();
+  }
+  function markCursor() {
+    [...findR.children].forEach((li, i) =>
+      li.setAttribute('aria-selected', i === cursor ? 'true' : 'false'));
+    findR.children[cursor]?.scrollIntoView({block: 'nearest'});
+  }
+  function gotoHit(i) {
+    const it = hits[i];
+    if (!it) return;
+    closeFind();
+    it.el.scrollIntoView({block: 'center', behavior: 'smooth'});
+    it.el.animate([{background: 'transparent'}, {background: 'var(--mark)'},
+                   {background: 'transparent'}], {duration: 1400});
+  }
+  function openFind() {
+    if (!index.length) buildIndex();
+    findBox.classList.add('show');
+    findQ.placeholder = t('find_ph');
+    findQ.select();
+    findQ.focus();
+    runFind();
+  }
+  function closeFind() { findBox.classList.remove('show'); }
+
+  findQ.addEventListener('input', runFind);
+  findBox.addEventListener('mousedown', e => { if (e.target === findBox) closeFind(); });
+  findQ.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeFind(); return; }
+    if (e.key === 'Enter') { gotoHit(cursor); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const n = Math.min(hits.length, 60);
+      if (!n) return;
+      cursor = (cursor + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+      markCursor();
+    }
+  });
 
   // 阅读进度 + 目录高亮 + 记住滚动位置
   const prog = document.getElementById('prog');
@@ -1605,7 +1775,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 键盘：j/k 滚动，t 主题，/ 聚焦搜索(浏览器原生)，g/G 首尾
   addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault(); openFind(); return;
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/' && !findBox.classList.contains('show')) {
+      e.preventDefault(); openFind(); return;
+    }
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea') return;
     if (e.key === 'j') scrollBy({top: 120, behavior:'smooth'});
@@ -1757,6 +1933,15 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 <div id="wrap">
 {toc_html}
 <main><article>{meta_html}{body}</article></main>
+</div>
+<div id="find" role="dialog" aria-modal="true" aria-label="Find">
+  <div class="panel">
+    <div class="top">
+      <input id="find-q" type="text" autocomplete="off" spellcheck="false">
+      <span class="count" id="find-n"></span>
+    </div>
+    <ul class="hits" id="find-r" role="listbox"></ul>
+  </div>
 </div>
 <div id="mjerr"><span id="mjerr-text"></span><button id="mjerr-x" title="关掉这个提示">×</button></div>
 <div id="flash"></div>
