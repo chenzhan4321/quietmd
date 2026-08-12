@@ -83,10 +83,6 @@ if [ "$1" = "--macos-app" ]; then
         i=$((i + 1))
     done
 
-    # AppleScript 走的是 shell，PATH 同样是精简的，所以写死命令的绝对路径
-    sed -i '' "s|\$HOME/.local/bin/quietmd|$BIN/quietmd|" \
-        "$APP/Contents/Resources/Scripts/main.scpt" 2>/dev/null || true
-
     if [ -f "$SRC/docs/icon.png" ] && command -v iconutil >/dev/null 2>&1; then
         ICONSET="$(mktemp -d)/quietmd.iconset"; mkdir -p "$ICONSET"
         for s in 16 32 128 256 512; do
