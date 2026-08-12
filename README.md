@@ -101,6 +101,8 @@ $ cd quietmd && ./install.sh
 
 On macOS, `./install.sh --macos-app` also makes double-clicking a `.md` open it here.
 
+To remove it again: `./uninstall.sh` (add `--cache` to drop the render cache too).
+
 MathJax (2.2 MB) isn't in the repository — the first run fetches it once, and nothing
 touches the network after that.
 

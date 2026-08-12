@@ -24,6 +24,17 @@ jobs:
       - name: Run the self-check
         run: bash verify.sh
 
+      - name: install.sh works on a clean Linux box
+        run: |
+          ./install.sh
+          test -x "$HOME/.local/bin/quietmd"
+          # 真跑一次：验证 MathJax 自动下载 + 渲染都通
+          "$HOME/.local/bin/quietmd" tests/math_torture.md --no-open -o /tmp/ci.html
+          test -s /tmp/ci.html
+          "$HOME/.local/bin/quietmd" --version
+          ./uninstall.sh
+          test ! -e "$HOME/.local/bin/quietmd"
+
       - name: --check should flag exactly the deliberately broken formula
         run: |
           set +e

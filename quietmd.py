@@ -43,6 +43,8 @@ from pathlib import Path
 # 0. 常量
 # --------------------------------------------------------------------------
 
+__version__ = "0.2.0"
+
 HERE = Path(__file__).resolve().parent
 MATHJAX_PATH = HERE / "tex-svg-full.js"
 CACHE_DIR = Path.home() / ".cache" / "quietmd"
@@ -120,7 +122,10 @@ def ensure_mathjax() -> Path:
         f"来源：{MATHJAX_URLS[0]}"
     )
 
-# 占位符用 Unicode 私用区字符：CommonMark 不会转义、不会拆分它们
+# 占位符用 Unicode 私用区字符：CommonMark 不会转义、不会拆分它们。
+# 中间还夹一段每次运行随机生成的 nonce —— 满文、古籍转写、图标字体都可能
+# 在正文里带私用区字符，没有 nonce 的话它们会被当成占位符，
+# 替换成文档里别处的公式（内容损坏，而且悄无声息）。
 PH_OPEN, PH_CLOSE = "\ue000", "\ue001"
 
 # 可以裸写（不包在 $$ 里）的 LaTeX 环境。MathJax 的 processEnvironments 认这些。
@@ -147,11 +152,13 @@ class MathLocker:
     """
 
     def __init__(self, text: str):
+        import secrets
         self.s = text
         self.n = len(text)
         self.i = 0
         self.out: list[str] = []
         self.math: list[dict] = []
+        self.nonce = secrets.token_hex(4)
 
     # -- 工具 ------------------------------------------------------------
     def _at_line_start(self) -> bool:
@@ -164,10 +171,10 @@ class MathLocker:
         """kind: 'inline' | 'display' | 'env'"""
         idx = len(self.math)
         self.math.append({"tex": tex, "kind": kind})
-        self.out.append(f"{PH_OPEN}{idx}{PH_CLOSE}")
+        self.out.append(f"{PH_OPEN}{self.nonce}:{idx}{PH_CLOSE}")
 
     # -- 主循环 ----------------------------------------------------------
-    def run(self) -> tuple[str, list[dict]]:
+    def run(self) -> tuple[str, list[dict], str]:
         s, n = self.s, self.n
         while self.i < n:
             c = s[self.i]
@@ -209,7 +216,7 @@ class MathLocker:
             self._emit(c)
             self.i += 1
 
-        return "".join(self.out), self.math
+        return "".join(self.out), self.math, self.nonce
 
     # -- 各个分支 --------------------------------------------------------
     def _try_fence(self) -> bool:
@@ -403,10 +410,10 @@ def render_markdown(src: str, md) -> tuple[str, list[dict]]:
     return body, toc
 
 
-def restore_math(body: str, math: list[dict]) -> str:
+def restore_math(body: str, math: list[dict], nonce: str) -> str:
     """把占位符换回公式。统一输出成 \\( \\) / \\[ \\] / 裸环境 三种形式，
     MathJax 只需认这三种，$ 完全不参与扫描 —— 所以 $100 永远不会被误渲染。"""
-    pat = re.compile(PH_OPEN + r"(\d+)" + PH_CLOSE)
+    pat = re.compile(PH_OPEN + re.escape(nonce) + r":(\d+)" + PH_CLOSE)
 
     def sub(m):
         item = math[int(m.group(1))]
@@ -425,8 +432,14 @@ def restore_math(body: str, math: list[dict]) -> str:
 # 3. 资源内嵌（图片 / 相对链接）
 # --------------------------------------------------------------------------
 
-def inline_assets(body: str, base_dir: Path) -> str:
+def inline_assets(body: str, base_dir: Path) -> tuple[str, int]:
+    """把本地图片编成 base64 塞进 HTML，让产物真的是「一个文件」。
+
+    超出预算的图片改成 file:// 绝对路径 —— 那样页面在本机还能看，
+    但发给别人就断了。返回被跳过的张数，由调用方告诉用户，不闷着。
+    """
     budget = [IMG_INLINE_BUDGET]
+    skipped = [0]
 
     def fix_src(m):
         pre, url, post = m.group(1), m.group(2), m.group(3)
@@ -452,7 +465,7 @@ def inline_assets(body: str, base_dir: Path) -> str:
         p = (base_dir / url).resolve()
         return f'{pre}file://{p}{post}' if p.exists() else m.group(0)
 
-    return re.sub(r'(<a[^>]*\shref=")([^"]+)(")', fix_href, body)
+    return re.sub(r'(<a[^>]*\shref=")([^"]+)(")', fix_href, body), skipped[0]
 
 
 # --------------------------------------------------------------------------
@@ -548,6 +561,7 @@ body{
 #bar{
   position:fixed; top:0; left:0; right:0; height:46px; z-index:50;
   display:flex; align-items:center; gap:.15rem; padding:0 .55rem;
+  background:var(--bg);                       /* 老浏览器的退路 */
   background:color-mix(in srgb, var(--bg) 84%, transparent);
   backdrop-filter:saturate(180%) blur(16px);
   -webkit-backdrop-filter:saturate(180%) blur(16px);
@@ -595,6 +609,7 @@ body{
 
 #bar #btn-lang{
   font-size:11px; padding:.3rem .48rem;
+  border:1px solid var(--rule);
   border:1px solid color-mix(in srgb, var(--rule) 80%, transparent);
 }
 
@@ -607,7 +622,9 @@ body{
 }
 #bar select{
   font:inherit; color:var(--fg-dim); line-height:1;
-  background:transparent; border:1px solid color-mix(in srgb, var(--rule) 80%, transparent);
+  background:transparent;
+  border:1px solid var(--rule);
+  border:1px solid color-mix(in srgb, var(--rule) 80%, transparent);
   border-radius:6px; padding:.32rem 1.5rem .32rem .55rem; cursor:pointer;
   -webkit-appearance:none; appearance:none;
 }
@@ -658,6 +675,7 @@ article h3{font-size:1.2em}
 article h4{font-size:1.02em; color:var(--fg-dim)}
 article p{margin:0 0 1.15em}
 article a{color:var(--accent); text-decoration:none;
+  border-bottom:1px solid var(--rule);
   border-bottom:1px solid color-mix(in srgb, var(--accent) 35%, transparent)}
 article a:hover{border-bottom-color:var(--accent)}
 article strong{font-weight:650}
@@ -714,6 +732,9 @@ pre.highlight{background:var(--code-bg)}
   mask-image:linear-gradient(to right, #000 calc(100% - 3rem), transparent);
 }
 .mjx-block.wide.at-end{-webkit-mask-image:none; mask-image:none}
+/* 只写了宏定义、渲染结果为空的块 —— 收掉，别在版面上留一段空白。
+   必须写在 .mjx-block 之后：同特异性下后写的赢，写在前面会被 display:block 压掉。 */
+.mjx-empty{display:none}
 mjx-container[display="true"]{margin:0 !important}
 mjx-container{color:var(--fg)}
 mjx-container svg a{color:var(--accent)}
@@ -722,16 +743,20 @@ mjx-container svg a{color:var(--accent)}
    或者里面有 merror，就算失败。失败时原始 LaTeX 以红色等宽显示。 */
 .mjx-failed{
   font-family:var(--mono) !important; font-size:.82em; color:var(--err);
+  background:var(--accent-soft);
   background:color-mix(in srgb, var(--err) 12%, transparent);
+  outline:1px dashed var(--err);
   outline:1px dashed color-mix(in srgb, var(--err) 55%, transparent);
   border-radius:4px; padding:.1em .3em; white-space:pre-wrap; text-align:left;
 }
 /* 排出来了、但里面有不认识的命令：公式主体照常显示，只在下面提示一下。
    比整条标红克制得多，因为这种公式大部分内容仍然是可读的。 */
 .mjx-warn{
+  border-bottom:2px dashed var(--err);
   border-bottom:2px dashed color-mix(in srgb, var(--err) 45%, transparent);
   padding-bottom:1px;
 }
+[data-mml-node="merror"] rect{fill:var(--accent-soft) !important}
 [data-mml-node="merror"] rect{fill:color-mix(in srgb,var(--err) 18%,transparent) !important}
 [data-mml-node="merror"] text{fill:var(--err) !important}
 #mjerr{display:none; position:fixed; right:1rem; bottom:1rem; z-index:70;
@@ -739,7 +764,7 @@ mjx-container svg a{color:var(--accent)}
   padding:.5rem .8rem; border-radius:8px; cursor:pointer;
   box-shadow:0 4px 16px rgba(0,0,0,.28)}
 #mjerr{display:none; align-items:center; gap:.55rem}
-#mjerr[style*="block"]{display:flex !important}
+#mjerr.show{display:flex}
 #mjerr-x{
   font:inherit; font-size:15px; line-height:1; color:#fff; opacity:.7;
   background:transparent; border:0; border-radius:5px; cursor:pointer;
@@ -838,15 +863,15 @@ def cli_lang() -> str:
 
 # 顶栏图标。统一 1.25px 描边、currentColor，跟正文衬线的细笔画一个调子。
 ICONS = {
-    "sidebar": '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+    "sidebar": '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" '
                'stroke-width="1.25" stroke-linejoin="round">'
                '<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2"/>'
                '<path d="M6.2 2.6v10.8" /><rect x="1.6" y="2.6" width="4.6" '
                'height="10.8" rx="2" fill="currentColor" stroke="none" opacity=".85"/></svg>',
-    "theme":   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25">'
+    "theme":   '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25">'
                '<circle cx="8" cy="8" r="5.4"/>'
                '<path d="M8 2.6a5.4 5.4 0 0 1 0 10.8z" fill="currentColor" stroke="none"/></svg>',
-    "print":   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+    "print":   '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" '
                'stroke-width="1.25" stroke-linejoin="round">'
                '<path d="M4.4 6V2.6h7.2V6"/>'
                '<rect x="1.9" y="6" width="12.2" height="5" rx="1.4"/>'
@@ -1011,6 +1036,11 @@ html[data-style="latex"] article p{
   /* 中文没有词间空格，默认的两端对齐只能靠拉字距来凑，"行 内 ： 设" 会散开。
      inter-word 限定只在词间空隙上分配，中文段落因此保持正常字距。 */
   text-justify:inter-word;
+}
+/* Safari 不实现 text-justify，中文段落会被拉成「行 内 ： 设」。
+   检测不到这个属性就退回左对齐——宁可不齐边，也不要散架的字距。 */
+@supports not (text-justify: inter-word){
+  html[data-style="latex"] article p{text-align:left}
 }
 html[data-style="latex"] article h1+p,
 html[data-style="latex"] article h2+p,
@@ -1217,10 +1247,10 @@ window.MathJax = {
           };
           const b = document.getElementById('mjerr');
           renderBanner();
-          b.style.display = 'block';
+          b.classList.add('show');
           document.getElementById('mjerr-x').onclick = (ev) => {
             ev.stopPropagation();
-            b.style.display = 'none';
+            b.classList.remove('show');
           };
           let k = 0;
           b.onclick = () => {
@@ -1250,6 +1280,16 @@ window.MathJax = {
             flash((L1[document.documentElement.getAttribute('lang') || 'en'] || L1.en)['copied']);
           });
         });
+        // 只写了 \newcommand 的块渲染出来是个空盒子：屏幕上看不出来，
+        // 打印时却留下一整块空白。量出来接近零宽就收掉。
+        document.querySelectorAll('.mjx-block').forEach(el => {
+          if (el.classList.contains('mjx-failed')) return;   // 那条要显示原文，不能收
+          // 量 svg 而不是 container：display 公式的 container 是块级、永远撑满栏宽，
+          // 真正说明「里面什么都没有」的是 svg 本身的宽度。
+          const svg = el.querySelector('svg');
+          if (svg && svg.getBoundingClientRect().width < 2) el.classList.add('mjx-empty');
+        });
+
         // 装不下的公式标记出来，右缘渐隐提示可以横向滚动
         document.querySelectorAll('.mjx-block').forEach(el => {
           const mark = () => {
@@ -1405,6 +1445,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const applyToc = (v) => {
     root.dataset.toc = v;
     tocBtn.classList.toggle('on', v !== 'off');
+    tocBtn.setAttribute('aria-pressed', v !== 'off' ? 'true' : 'false');
   };
   if (!tocBox) tocBtn.style.display = 'none';
   else {
@@ -1436,7 +1477,11 @@ document.addEventListener('DOMContentLoaded', () => {
     root.setAttribute('lang', lang);
     const set = (id, attr, val) => {
       const el = document.getElementById(id);
-      if (el) attr === 'text' ? (el.textContent = val) : el.setAttribute(attr, val);
+      if (!el) return;
+      if (attr === 'text') { el.textContent = val; return; }
+      el.setAttribute(attr, val);
+      // 图标按钮只有图形，屏幕阅读器读不出来；名字跟 tooltip 同源，切语言一起变
+      if (attr === 'title') el.setAttribute('aria-label', val);
     };
     set('btn-lang', 'text', t('lang_btn'));
     set('btn-lang', 'title', t('lang_title'));
@@ -1545,15 +1590,23 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
     meta, text = split_front_matter(text)
 
     # ① 上锁：公式先从原文里抠出来
-    locked, math = MathLocker(text).run()
+    locked, math, nonce = MathLocker(text).run()
 
     # ② Markdown 渲染（此时文中只有占位符，解析器碰不到任何 LaTeX）
     md = build_markdown()
     body, toc = render_markdown(locked, md)
 
     # ③ 原样放回
-    body = restore_math(body, math)
-    body = inline_assets(body, md_path.parent)
+    body = restore_math(body, math, nonce)
+    body, imgs_skipped = inline_assets(body, md_path.parent)
+    if imgs_skipped:
+        zh = cli_lang() == "zh"
+        print(f"提醒：{imgs_skipped} 张图片超出 {IMG_INLINE_BUDGET // 1024 // 1024} MB 内嵌预算，"
+              f"改用了本机绝对路径——这份 HTML 发给别人会看不到那几张图。" if zh else
+              f"Note: {imgs_skipped} image(s) exceeded the "
+              f"{IMG_INLINE_BUDGET // 1024 // 1024} MB inlining budget and now point at "
+              f"local paths — those won't show if you send this HTML to someone.",
+              file=sys.stderr)
     # 本地阅读器也不该执行文档里夹带的脚本
     body = re.sub(r"<script[\s\S]*?</script>|<iframe[\s\S]*?</iframe>", "", body, flags=re.I)
 
@@ -1585,7 +1638,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
             f'{html.escape(h["text"])}</a>'
             for h in toc
         )
-        toc_html = f'<nav id="toc"><p class="ttl">{UI[lang]["toc_head"]}</p>{items}</nav>'
+        toc_html = f'<nav id="toc" aria-label="{UI[lang]["toc_head"]}"><p class="ttl">{UI[lang]["toc_head"]}</p>{items}</nav>'
 
     name = html.escape(md_path.name)
 
@@ -1610,10 +1663,10 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 <body>
 <div id="prog"></div>
 <div id="bar">
-  <button id="btn-toc" class="ico">{ICONS["sidebar"]}</button>
+  <button id="btn-toc" class="ico" aria-pressed="true">{ICONS["sidebar"]}</button>
   <span class="fname">{name}</span>
   <span class="sp"></span>
-  <span class="grp hide-xs"><span class="sel"><select id="sel-style">{style_opts}</select></span></span>
+  <span class="grp hide-xs"><span class="sel"><select id="sel-style" aria-label="Typographic style">{style_opts}</select></span></span>
   <span class="grp hide-sm">
     <button id="btn-narrower">−</button>
     <span class="val" id="val-measure">—</span>
@@ -1800,6 +1853,8 @@ def main() -> int:
                     help="initial typographic style: "
                          + ", ".join(f"{k}={v['en']}" for k, v in STYLES.items())
                          + " (press s in the page to cycle)")
+    ap.add_argument("-V", "--version", action="version",
+                    version=f"quietmd {__version__}")
     ap.add_argument("--lang", default="en", choices=["en", "zh"],
                     help="initial interface language (a button in the page switches it)")
     args = ap.parse_args()

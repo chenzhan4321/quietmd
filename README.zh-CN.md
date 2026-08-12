@@ -93,6 +93,8 @@ $ cd quietmd && ./install.sh
 
 macOS 上加 `./install.sh --macos-app`，双击 `.md` 就用它打开。
 
+想卸载：`./uninstall.sh`（加 `--cache` 连渲染缓存一起删）。
+
 MathJax（2.2 MB）没放进版本库 —— 第一次运行时下载一次，之后全程不联网。
 
 ## 自己验证
