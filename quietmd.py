@@ -434,7 +434,10 @@ def build_markdown():
         # 用 pygments 默认的 <div class="highlight"><pre> 会被 markdown-it
         # 再包一层 <pre><code>，代码块就套成了两层框。
         inner = pyg_highlight(code, lexer, HtmlFormatter(nowrap=True))
-        return f'<pre class="highlight"><code>{inner}</code></pre>'
+        # 把语言标在元素上：源文件里 ```python 已经写明了，渲染后把它丢掉
+        # 只会逼前端去猜（猜 raise SystemExit 是不是 python 这种）
+        tag = html.escape(lang or "", quote=True)
+        return f'<pre class="highlight" data-lang="{tag}"><code>{inner}</code></pre>'
 
     md = (
         MarkdownIt("gfm-like", {"html": True, "linkify": True, "typographer": False,
@@ -1049,6 +1052,30 @@ html[data-facing="1"] main{padding-left:1.5rem; padding-right:1.5rem}
   .facing-img img{max-height:none}   /* 纸上没有「一屏」这回事 */
 }
 
+
+/* ---------- 跑代码块（只在 -w --run 下出现） ---------- */
+.run-bar{
+  display:flex; align-items:center; gap:.6rem;
+  margin:-1.2em 0 1.4em; font-family:var(--sans); font-size:11.5px;
+}
+.run-btn{
+  font:inherit; color:var(--fg-dim); background:transparent;
+  border:1px solid var(--rule); border-radius:6px;
+  padding:.24rem .6rem; cursor:pointer;
+}
+.run-btn:hover:not([disabled]){color:var(--fg); background:var(--bg-soft)}
+.run-btn[disabled]{opacity:.5; cursor:default}
+.run-lang{color:var(--fg-dim); opacity:.6; font-variant-numeric:tabular-nums}
+.run-out{
+  font-family:var(--mono); font-size:.8em; line-height:1.5;
+  white-space:pre-wrap; word-break:break-word;
+  background:var(--bg-soft); border:0; border-left:3px solid var(--accent);
+  border-radius:0 6px 6px 0; padding:.7em .9em; margin:-.8em 0 1.6em;
+  max-height:26em; overflow:auto;
+}
+.run-out.bad{border-left-color:var(--err); color:var(--err)}
+@media print{ .run-bar{display:none} }
+
 /* 脚注 */
 .footnotes{margin-top:3.5em; padding-top:1.2em; border-top:1px solid var(--rule);
   font-size:.88em; color:var(--fg-dim)}
@@ -1225,6 +1252,8 @@ UI = {
         "find_none": "Nothing found.",
         "resumed": "Picked up where you left off · ",
         "diff_changes": "changes", "diff_math": "involving formulas",
+        "run_it": "Run", "run_running": "Running…", "run_again": "Run again",
+        "run_no_output": "(no output)",
         "console_dead": "[quietmd] these formulas won't render:",
         "console_warn": "[quietmd] these formulas contain unknown commands:",
     },
@@ -1248,6 +1277,8 @@ UI = {
         "find_none": "没找到。",
         "resumed": "接着上次读到的地方 · ",
         "diff_changes": "处改动", "diff_math": "处涉及公式",
+        "run_it": "运行", "run_running": "运行中…", "run_again": "再跑一次",
+        "run_no_output": "（没有输出）",
         "console_dead": "[quietmd] 这些公式排不出来：",
         "console_warn": "[quietmd] 这些公式里有不认识的命令：",
     },
@@ -1740,6 +1771,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let lang = localStorage.getItem('quietmd-lang')
              || document.documentElement.getAttribute('lang') || 'en';
   const t = (k) => (I18N[lang] || I18N.en)[k];
+  // -w 注入的脚本是另一个作用域，够不着这里的局部变量，所以挂出去一份
+  window.__t = t;
 
   // ---- 排版风格 ----------------------------------------------------
   const styleKeys = Object.keys(STYLES);
@@ -2126,6 +2159,59 @@ document.addEventListener('DOMContentLoaded', () => {
 """
 
 WATCH_JS = r"""
+// --run 下：给可运行的代码块加一个运行按钮，输出显示在下面。
+// 这段只在 -w 的页面里存在；静态导出的 HTML 里没有它，分享出去也带不走这个能力。
+(function () {
+  const LANGS = ['python', 'py', 'bash', 'sh', 'zsh'];
+  // 主脚本还没跑到时也要有话可说，所以带一份兜底文案
+  const tr = (k) => (window.__t ? window.__t(k)
+    : {run_it: 'Run', run_running: 'Running…', run_again: 'Run again',
+       run_no_output: '(no output)'}[k]);
+  addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('article pre.highlight').forEach(pre => {
+      const code = pre.textContent;
+      const lang = (pre.dataset.lang || '').toLowerCase();
+      if (!LANGS.includes(lang)) return;
+
+      const bar = document.createElement('div');
+      bar.className = 'run-bar';
+      const btn = document.createElement('button');
+      btn.className = 'run-btn';
+      btn.textContent = tr('run_it');
+      const tag = document.createElement('span');
+      tag.className = 'run-lang';
+      tag.textContent = lang;
+      bar.append(btn, tag);
+      pre.after(bar);
+
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = tr('run_running');
+        let box = bar.nextElementSibling;
+        if (!box || !box.classList.contains('run-out')) {
+          box = document.createElement('pre');
+          box.className = 'run-out';
+          bar.after(box);
+        }
+        box.textContent = '';
+        try {
+          const r = await fetch('/__run', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({lang, code})});
+          const res = await r.json();
+          box.textContent = res.out || tr('run_no_output');
+          box.classList.toggle('bad', !res.ok);
+        } catch (e) {
+          box.textContent = String(e);
+          box.classList.add('bad');
+        }
+        btn.disabled = false;
+        btn.textContent = tr('run_again');
+      };
+    });
+  });
+})();
+
 // -w 模式下，把「读到哪一节」回传给本地服务，由它写成 sidecar 文件。
 // 存小节 id 而不是像素位置：改字号、换风格、文中加几段，它都还指着同一处。
 // 静态打开（file://）时没有服务，这段自然不生效，仍然靠 localStorage 记位置。
@@ -2409,6 +2495,54 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 # 甚至文档中间加了几段，小节 id 依然指向同一处。
 # --------------------------------------------------------------------------
 
+
+# --------------------------------------------------------------------------
+# 6b. 跑代码块
+#
+# 一本写着「每个数字你都能自己跑出来」的书，读者却得把代码抄进终端再切回来。
+# 这里让代码块就地能跑，输出显示在它下面。
+#
+# 边界画得很死，因为这毕竟是在执行代码：
+#   · 只在 -w 下（有本地服务），静态 HTML 分享出去带不了这个能力；
+#   · 要显式加 --run 才开，默认关；
+#   · 只跑白名单里的语言，用 uv run / sh 在文档所在目录执行；
+#   · 每次有超时，输出有长度上限。
+# 换句话说：只有你在自己机器上明确要求时，你自己写的文档里的代码才跑得起来。
+# --------------------------------------------------------------------------
+
+RUNNABLE = {
+    "python": ["uv", "run", "--quiet", "python", "-"],
+    "py": ["uv", "run", "--quiet", "python", "-"],
+    "bash": ["bash", "-s"],
+    "sh": ["sh", "-s"],
+    "zsh": ["zsh", "-s"],
+}
+
+
+def run_snippet(lang: str, code: str, cwd: Path, timeout: int = 60) -> dict:
+    import subprocess
+    argv = RUNNABLE.get((lang or "").lower())
+    if not argv:
+        return {"ok": False, "out": f"不支持在这里运行 {lang!r}"}
+    if argv[0] == "uv":
+        uv = next((c for c in (Path.home() / ".local/bin/uv", Path("/opt/homebrew/bin/uv"),
+                               Path("/usr/local/bin/uv")) if c.is_file()), None)
+        if uv is None:
+            return {"ok": False, "out": "找不到 uv"}
+        argv = [str(uv)] + argv[1:]
+    try:
+        r = subprocess.run(argv, input=code, cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "out": f"超时（{timeout}s）—— 已经掐掉"}
+    except OSError as e:
+        return {"ok": False, "out": str(e)}
+    out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
+    if len(out) > 40000:
+        out = out[:40000] + "\n…（输出过长，已截断）"
+    return {"ok": r.returncode == 0, "code": r.returncode, "out": out.rstrip()}
+
+
 def state_path(md_path: Path) -> Path:
     name = md_path.name + (".dir" if md_path.is_dir() else "")
     return (md_path if md_path.is_dir() else md_path.parent) / f".quietmd-{name}.json"
@@ -2432,7 +2566,7 @@ def write_state(md_path: Path, data: dict) -> None:
 
 def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
           style: str = "paper", lang: str = "en", excl: tuple[str, ...] = (),
-          facing: bool = False) -> None:
+          facing: bool = False, allow_run: bool = False) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -2465,6 +2599,18 @@ def serve(md_path: Path, mathjax_js: str, port: int, open_browser: bool = True,
             self._send(page.encode(), "text/html; charset=utf-8")
 
         def do_POST(self):
+            if self.path.startswith("/__run"):
+                if not allow_run:
+                    self.send_response(403); self.end_headers(); return
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    req = json.loads(self.rfile.read(n) or b"{}")
+                    res = run_snippet(str(req.get("lang", "")), str(req.get("code", "")),
+                                      md_path if md_path.is_dir() else md_path.parent)
+                except (ValueError, OSError) as e:
+                    res = {"ok": False, "out": str(e)}
+                self._send(json.dumps(res).encode(), "application/json")
+                return
             if not self.path.startswith("/__pos"):
                 self.send_response(404); self.end_headers(); return
             try:
@@ -2743,6 +2889,9 @@ def main() -> int:
                          + " (press s in the page to cycle)")
     ap.add_argument("-V", "--version", action="version",
                     version=f"quietmd {__version__}")
+    ap.add_argument("--run", action="store_true",
+                    help="with -w only: put a Run button on python/shell code blocks "
+                         "and show their output in place (off by default)")
     ap.add_argument("--facing", action="store_true",
                     help="page-facing layout: each image is pinned beside the text "
                          "that follows it (for checking a transcription against a scan)")
@@ -2805,7 +2954,7 @@ def main() -> int:
     if args.watch:
         serve(md_path, mathjax_js, args.port, open_browser=not args.no_open,
               style=args.style, lang=args.lang, excl=tuple(args.exclude),
-              facing=args.facing)
+              facing=args.facing, allow_run=args.run)
         return 0
 
     page = build_html(md_path, mathjax_js, watch=False, style=args.style,

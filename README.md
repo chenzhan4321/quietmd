@@ -117,6 +117,23 @@ skipped — those are usually notes to the author rather than the text. Use
 `--exclude 'full_*.md'` to skip anything else; the file list is always printed, because
 a directory that also holds a generated merge would otherwise count everything twice.
 
+## Running the code in the document
+
+A book that says "you can run this yourself" still makes the reader copy each snippet into
+a terminal. With a local server you don't have to:
+
+```console
+$ quietmd chapter.md -w --run
+```
+
+Python and shell blocks get a Run button, and the output appears underneath, in the
+document's own directory.
+
+The boundaries are deliberately tight, because this executes code: only under `-w`, only
+with `--run` (off by default), only the languages listed above, with a timeout and a cap
+on output. A statically exported HTML has none of it — the ability cannot be shared along
+with the file.
+
 ## Checking a transcription against the scan
 
 ```console
