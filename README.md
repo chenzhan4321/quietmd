@@ -134,6 +134,27 @@ with `--run` (off by default), only the languages listed above, with a timeout a
 on output. A statically exported HTML has none of it — the ability cannot be shared along
 with the file.
 
+## Citations that go somewhere
+
+Text like `[Paper §4.1]` is just text. Name the source once in the front matter and every
+mention becomes a link:
+
+```yaml
+---
+refs:
+  Paper: https://arxiv.org/abs/2606.07502
+---
+```
+
+Put `{sec}` in the URL and the section number is filled in — `[Paper §3.2.2]` with
+`…/html/2606.07502v1#S{sec}` lands on that section. A mention with no section number, like
+`[Paper Table 1]`, drops the fragment and goes to the document itself rather than to a
+made-up anchor.
+
+Paths inside the document need no configuration: `` `outputs/sts_results.json` `` becomes a
+link **only if that file actually exists**, so a path written in passing doesn't turn into
+a dead link.
+
 ## Checking a transcription against the scan
 
 ```console

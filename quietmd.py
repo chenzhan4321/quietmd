@@ -478,6 +478,62 @@ def render_markdown(src: str, md, math: list[dict], nonce: str) -> tuple[str, li
 TOC_HEADS = ("目录", "contents", "table of contents", "toc", "目次", "もくじ")
 
 
+
+def link_refs(body: str, meta: dict, base_dir: Path) -> str:
+    """把正文里的引用标记变成能点的链接。
+
+    两种，来源不同所以做法不同：
+
+    1. 外部出处，比如 `[论文 §4.1]`。工具无从知道「论文」是哪一篇，
+       所以要在 front matter 里说一声：
+
+           refs:
+             论文: https://arxiv.org/abs/2606.07502
+
+       URL 里写 {sec} 的话，会把 § 后面的节号填进去。
+
+    2. 项目里的文件，比如 `[本项目实测，见 `outputs/sts_results.json`]`。
+       这个不用配置 —— 路径就写在那儿，**文件真的存在**才链，
+       不存在就当普通代码留着（免得把随手写的路径变成死链）。
+    """
+    refs = meta.get("refs") if isinstance(meta.get("refs"), dict) else {}
+    for key, url in refs.items():
+        if not isinstance(url, str):
+            continue
+        pat = re.compile(r"\[(" + re.escape(str(key)) + r"[^\]<]{0,60})\]")
+
+        def sub(m, url=url):
+            inner = m.group(1)
+            target = url
+            if "{sec}" in url:
+                sec = re.search(r"§\s*([\d.]+)", inner)
+                if sec:
+                    target = url.replace("{sec}", sec.group(1))
+                else:
+                    # 「Table 1」「Fig. 2」这类没有节号：把带占位符的锚点整个去掉，
+                    # 链到基础地址，而不是拼出一个 #S 这样跳不到任何地方的碎片
+                    target = re.sub(r"#[^#]*\{sec\}[^#]*$", "", url).replace("{sec}", "")
+            return (f'<a class="xref" href="{html.escape(target, quote=True)}" '
+                    f'target="_blank" rel="noopener">[{inner}]</a>')
+
+        body = pat.sub(sub, body)
+
+    def code_link(m):
+        txt = m.group(1)
+        if "/" not in txt or " " in txt or len(txt) > 120:
+            return m.group(0)
+        try:
+            f = (base_dir / html.unescape(txt)).resolve()
+        except (OSError, ValueError):
+            return m.group(0)
+        if not f.is_file():
+            return m.group(0)
+        return (f'<a class="xref-file" href="{f.as_uri()}">'
+                f'<code>{txt}</code></a>')
+
+    return re.sub(r"<code>([^<]+)</code>", code_link, body)
+
+
 def link_body_toc(body: str, toc: list[dict]) -> str:
     """把正文里手写的目录变成能点的链接，以及把 [TOC] 展开成完整目录。
 
@@ -983,6 +1039,16 @@ article pre{background:var(--code-bg); border:1px solid var(--rule); border-radi
   padding:.95em 1.1em; overflow-x:auto; margin:1.6em 0; line-height:1.55}
 article pre code{background:none; padding:0; font-size:.82em}
 pre.highlight{background:var(--code-bg)}
+
+/* 引用标记的链接：正文里这种东西不少，不能个个都抢眼，
+   所以只给一条虚下划线，鼠标移上去才显色 */
+.xref, .xref-file{
+  color:inherit; text-decoration:none;
+  border-bottom:1px dashed var(--rule);
+  border-bottom:1px dashed color-mix(in srgb, var(--fg-dim) 45%, transparent);
+}
+.xref:hover, .xref-file:hover{color:var(--accent); border-bottom-color:var(--accent)}
+.xref-file code{background:var(--code-bg)}
 
 /* 正文里用 [TOC] 生成的目录 */
 .doc-toc ul{list-style:none; padding-left:0; margin:1.4em 0}
@@ -2327,6 +2393,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
         # ③ 原样放回
         body = restore_math(body, math, nonce)
         body = link_body_toc(body, toc)
+        body = link_refs(body, meta, md_path if md_path.is_dir() else md_path.parent)
         if facing:
             body = make_facing(body)
     body, imgs_skipped = inline_assets(
