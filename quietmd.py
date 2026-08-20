@@ -43,7 +43,7 @@ from pathlib import Path
 # 0. 常量
 # --------------------------------------------------------------------------
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 HERE = Path(__file__).resolve().parent
 MATHJAX_PATH = HERE / "tex-svg-full.js"
@@ -839,7 +839,7 @@ CSS = r"""
   --bg:#fbfaf7; --bg-soft:#f3f1ec; --fg:#1f1d1a; --fg-dim:#6b665e;
   --rule:#e2ddd3; --accent:#2f5d9e; --accent-soft:#e8eef7;
   --mark:#fdf3c8; --code-bg:#f5f3ee; --err:#c0392b; --err-bg:#c0392b;
-  --fs:18px; --measure:44rem;
+  --fs:18px; --measure:44rem; --lh:1.72;
   --serif:"Iowan Old Style","Charter","Palatino","Palatino Linotype",Georgia,"Songti SC","Source Han Serif SC",serif;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
   --mono:"SF Mono","JetBrains Mono","Menlo","Consolas",monospace;
@@ -862,7 +862,10 @@ html[data-theme="dark"]{
 html{background:var(--bg)}
 body{
   margin:0; background:var(--bg); color:var(--fg);
-  font-family:var(--serif); font-size:var(--fs); line-height:1.72;
+  /* 行距走变量而不是写死：八种风格各有各的疏密，打印样式表还要在纸上
+     再收一档（屏幕自发光，行距得松；纸不发光，同样的松紧在纸上显得散）。
+     写死在 body 上的话，风格和打印就得互相压特异性。 */
+  font-family:var(--serif); font-size:var(--fs); line-height:var(--lh);
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
   font-variant-numeric:oldstyle-nums proportional-nums;
 }
@@ -1083,7 +1086,7 @@ pre.highlight{background:var(--code-bg)}
 }
 html[data-theme="dark"] .d-del{background:rgba(255,120,100,.075)}
 html[data-theme="dark"] .d-add{background:rgba(110,220,160,.075)}
-@media print{ .d-del{opacity:1} }
+/* 纸上的对比色怎么处理，见 PRINT_CSS */
 
 
 /* ---------- 对照版式：左图右文 ---------- */
@@ -1112,11 +1115,7 @@ html[data-facing="1"] main{padding-left:1.5rem; padding-right:1.5rem}
   .facing{grid-template-columns:1fr}
   .facing-img{position:static}
 }
-@media print{
-  .facing{break-inside:avoid; border-bottom:0}
-  .facing-img{position:static}
-  .facing-img img{max-height:none}   /* 纸上没有「一屏」这回事 */
-}
+/* 对照版式的打印规则见 PRINT_CSS */
 
 
 /* ---------- 跑代码块（只在 -w --run 下出现） ---------- */
@@ -1140,12 +1139,12 @@ html[data-facing="1"] main{padding-left:1.5rem; padding-right:1.5rem}
   max-height:26em; overflow:auto;
 }
 .run-out.bad{border-left-color:var(--err); color:var(--err)}
-@media print{ .run-bar{display:none} }
+/* 「跑一下」按钮不上纸，见 PRINT_CSS */
 
 /* 脚注 */
 .footnotes{margin-top:3.5em; padding-top:1.2em; border-top:1px solid var(--rule);
   font-size:.88em; color:var(--fg-dim)}
-.footnotes hr{display:none}
+.footnotes hr, hr.footnotes-sep{display:none}
 
 /* front matter 标题块 */
 #meta{margin-bottom:3rem; padding-bottom:1.6rem; border-bottom:1px solid var(--rule)}
@@ -1251,25 +1250,9 @@ mjx-container svg a{color:var(--accent)}
 #find .eqno{flex:0 0 auto; font-variant-numeric:tabular-nums; color:var(--accent);
   font-size:11.5px}
 #find .empty{padding:1.4rem .9rem; color:var(--fg-dim); font-size:12.5px; text-align:center}
-@media print{ #find{display:none !important} }
+/* 查找面板不上纸，见 PRINT_CSS */
 
-/* ---------- 打印 ---------- */
-@media print{
-  /* 纸上一律白底深字：风格的底色（book 的米黄、tufte 的 #fffff8）在屏幕上是它们的
-     标志，印出来却是满页油墨、还压低了文字对比度。字体、行宽、缩进这些版式照旧。
-     要 !important 是因为风格的选择器带属性、特异性压得过 :root。 */
-  html, html[data-style]{
-    --bg:#fff !important; --bg-soft:#f4f4f4 !important;
-    --fg:#111 !important; --fg-dim:#555 !important;
-    --code-bg:#f4f4f4 !important; --accent-soft:#eee !important;
-    --fs:11pt;
-  }
-  article{padding-top:0 !important}   /* 首页不要空出四分之一版 */
-  #bar,#toc,#prog,#mjerr{display:none !important}
-  #wrap{padding-top:0} main{padding:0} article{max-width:none}
-  article h1,article h2,article h3{break-after:avoid}
-  article pre,.mjx-block,article table,article img{break-inside:avoid}
-}
+/* 打印样式表见文件末尾的 PRINT_CSS —— 它必须排在风格表之后才生效 */
 """
 
 # --------------------------------------------------------------------------
@@ -1403,7 +1386,7 @@ html[data-style="book"][data-theme="dark"]{
   --bg:#191612; --bg-soft:#221e18; --fg:#e6ded0; --fg-dim:#968c7c;
   --rule:#332d24; --accent:#d5a25f; --accent-soft:#241f17; --code-bg:#211d17;
 }
-html[data-style="book"] body{line-height:1.82}
+html[data-style="book"]{--lh:1.82}
 html[data-style="book"] article{padding-top:3.5rem}
 /* 传统书籍：段落靠首行缩进分隔，而不是靠段间空白 */
 html[data-style="book"] article p{text-indent:2em; margin-bottom:.15em}
@@ -1451,7 +1434,8 @@ html[data-style="swiss"][data-theme="dark"]{
   --bg:#0e0e0f; --bg-soft:#1a1a1c; --fg:#f2f2f2; --fg-dim:#8c8c8c;
   --rule:#2a2a2c; --accent:#ff5c42; --accent-soft:#2a1512; --code-bg:#191919;
 }
-html[data-style="swiss"] body{line-height:1.62; font-size:calc(var(--fs) - 1px)}
+html[data-style="swiss"]{--lh:1.62}
+html[data-style="swiss"] body{font-size:calc(var(--fs) - 1px)}
 html[data-style="swiss"] article h1,
 html[data-style="swiss"] article h2,
 html[data-style="swiss"] article h3,
@@ -1494,7 +1478,8 @@ html[data-style="manuscript"][data-theme="dark"]{
   --bg:#141514; --bg-soft:#1d1f1d; --fg:#dcdcd6; --fg-dim:#87877f;
   --rule:#2b2d2b; --accent:#7fbf9a; --accent-soft:#18211b; --code-bg:#1b1d1b;
 }
-html[data-style="manuscript"] body{line-height:2.0; font-size:calc(var(--fs) - 2px)}
+html[data-style="manuscript"]{--lh:2.0}
+html[data-style="manuscript"] body{font-size:calc(var(--fs) - 2px)}
 html[data-style="manuscript"] article h1,
 html[data-style="manuscript"] article h2,
 html[data-style="manuscript"] article h3,
@@ -1530,7 +1515,7 @@ html[data-style="latex"][data-theme="dark"]{
   --bg:#101010; --bg-soft:#1a1a1a; --fg:#e8e8e8; --fg-dim:#909090;
   --rule:#2e2e2e; --accent:#8fa8ff; --accent-soft:#1a1e2c; --code-bg:#191919;
 }
-html[data-style="latex"] body{line-height:1.52}
+html[data-style="latex"]{--lh:1.52}
 html[data-style="latex"] article p{
   text-indent:1.5em; margin-bottom:0; text-align:justify; hyphens:auto;
   /* 中文没有词间空格，默认的两端对齐只能靠拉字距来凑，"行 内 ： 设" 会散开。
@@ -1578,7 +1563,8 @@ html[data-style="tufte"][data-theme="dark"]{
   --bg:#151513; --bg-soft:#1f1f1c; --fg:#f0f0e6; --fg-dim:#95958c;
   --rule:#31312c; --accent:#f0f0e6; --accent-soft:#22221e; --code-bg:#1d1d1a;
 }
-html[data-style="tufte"] body{line-height:1.62; font-size:calc(var(--fs) + 2px)}
+html[data-style="tufte"]{--lh:1.62}
+html[data-style="tufte"] body{font-size:calc(var(--fs) + 2px)}
 /* Tufte 的版面不居中：正文靠左，右边整片留白（原本是留给边注的） */
 html[data-style="tufte"] main{justify-content:flex-start; padding-left:3rem}
 html[data-style="tufte"] article h1,
@@ -1614,7 +1600,8 @@ html[data-style="medium"][data-theme="dark"]{
   --bg:#121212; --bg-soft:#1c1c1c; --fg:#e6e6e6; --fg-dim:#9a9a9a;
   --rule:#2b2b2b; --accent:#4caf50; --accent-soft:#162316; --code-bg:#1c1c1c;
 }
-html[data-style="medium"] body{line-height:1.78; font-size:calc(var(--fs) + 3px)}
+html[data-style="medium"]{--lh:1.78}
+html[data-style="medium"] body{font-size:calc(var(--fs) + 3px)}
 html[data-style="medium"] article h1,
 html[data-style="medium"] article h2,
 html[data-style="medium"] article h3,
@@ -1648,7 +1635,8 @@ html[data-style="github"][data-theme="dark"]{
   --bg:#0d1117; --bg-soft:#151b23; --fg:#f0f6fc; --fg-dim:#9198a1;
   --rule:#3d444d; --accent:#4493f8; --accent-soft:#121d2f; --code-bg:#151b23;
 }
-html[data-style="github"] body{line-height:1.6; font-size:calc(var(--fs) - 2px)}
+html[data-style="github"]{--lh:1.6}
+html[data-style="github"] body{font-size:calc(var(--fs) - 2px)}
 html[data-style="github"] article h1,
 html[data-style="github"] article h2,
 html[data-style="github"] article h3,
@@ -1670,6 +1658,182 @@ html[data-style="github"] article a:hover{text-decoration:underline}
 
 /* 页面宽度不在这里定义：它由顶栏的 stepper 以 inline style 写在 <html> 上
    （--measure: 76ch 之类），特异性最高，压得过任何风格自带的行宽。 */
+"""
+
+# --------------------------------------------------------------------------
+# 5c. 打印
+#
+# 单独一张表，而且必须排在 STYLE_CSS 之后 —— 风格的选择器都带 [data-style]，
+# 特异性压得过 :root，同级规则只能靠出现的先后分胜负。打印规则要是留在基础
+# 表里（原来就是），book 的米黄底、medium 的字号会赢，纸上还是屏幕那一套。
+#
+# 立场：纸和屏幕是两种介质，不是同一个版面的两种输出。屏幕自发光、能滚动、
+# 行宽由窗口决定；纸不发光、一页就是一页、行宽在按下打印之前就定死了。
+# 所以这里不是「把屏幕转成灰度」，而是重新排一次版。三条贯穿全表的原则：
+#
+#   · 版心由 @page 的页边距定，不靠 max-width。文字因此在纸上居中、左右
+#     留白对称，而不是挤在左边、右边空一长条。
+#   · 不依赖任何背景色。浏览器默认不打印背景图形，一张靠灰底区分代码块的
+#     样式表，在别人的打印机上就是一段没有边界的等宽字。所以代码块改细
+#     边框、表格改三线、diff 改符号 —— 背景关着也照样读得懂。
+#   · 颜色不是唯一的信息通道。红和绿在黑白激光机上是同一个灰。
+# --------------------------------------------------------------------------
+
+PRINT_CSS = r"""
+@page{
+  /* 只写页边距，不写 size：锁死 A4 会让用 Letter 的人白白多出一截边。
+     左右 32mm 是算出来的，不是挑好看的 —— 正文 11.5pt 时 A4 剩 146mm
+     版心，一行 36 个汉字 / 72 个西文字符，正好落在排字学说的 65–75 区间
+     里；换成 Letter 是 152mm、37 字 / 75 字符，仍在区间内。
+     （32mm 也恰好是 Word 的默认左右边距 3.17cm，印出来不会显得怪。）
+     下边距比上边距大 2mm：打印对话框勾了「页眉和页脚」时，页码就落在这
+     2mm 里，不会贴着正文最后一行。 */
+  margin:19mm 32mm 21mm;
+}
+
+@media print{
+
+/* ---------- 1. 界面不上纸 ---------- */
+#bar,#toc,#prog,#mjerr,#find,.run-bar{display:none !important}
+#wrap{display:block; padding-top:0}
+main{display:block; padding:0}
+article{width:auto; max-width:none; padding-top:0}
+/* 带 [data-style] / [data-facing] 前缀的一份，专门用来压风格自己的版心偏移：
+   book 的首页 3.5rem 留白纸上不要；tufte 的 padding-left:3rem 是它在屏幕上
+   「正文靠左、右边留白放边注」的做法，搬到纸上就成了一页歪的版心 —— 版心该
+   由 @page 的页边距对称地定出来。 */
+html[data-style] article{padding-top:0}
+html[data-style] main,html[data-facing="1"] main{padding:0; justify-content:center}
+
+/* ---------- 2. 底色与字号 ---------- */
+/* 风格的底色（book 的米黄、tufte 的 #fffff8）在屏幕上是它们的标志，印出来
+   是满页油墨，还压低了文字对比度。彩色一律收黑：同一份稿子在黑白激光机和
+   彩色喷墨上应该印出同一个样子。 */
+html,html[data-style]{
+  --bg:#fff !important; --bg-soft:#fff !important;
+  --fg:#000 !important; --fg-dim:#444 !important;
+  --rule:#b0b0b0 !important; --code-bg:#fff !important;
+  --accent:#000 !important; --accent-soft:#fff !important;
+  --fs:11.5pt;
+}
+/* 字号必须由这里说了算。风格们写的是 calc(var(--fs) + 3px) 这类相对量，
+   那是按 18px 的屏幕基准调的；直接搬到 11.5pt 上，medium 会变成 13.8pt、
+   github 变成 10.4pt，一行从 30 字跳到 40 字，上面算好的版心就白算了。 */
+html[data-style] body{font-size:var(--fs)}
+/* 行距在纸上收一档：屏幕自发光，行距松才不刺眼；纸不发光，同样的松紧在
+   纸上就只是散。稿件风格例外 —— 双倍行距是它存在的理由（审稿人要在行间
+   写字），不能因为「好看」给收掉。 */
+html,html[data-style]{--lh:1.52}
+html[data-style="manuscript"]{--lh:2}
+
+/* ---------- 3. 分页 ---------- */
+/* 段落被切开时，两边各自至少留三行：只剩一行掉在页顶或页底（寡行/孤行）
+   是最容易一眼看出「这是机器印的」的地方。 */
+article{orphans:3; widows:3}
+/* 标题不许留在页底当孤儿。只写 break-after:avoid 还不保险：Chrome 有时把
+   标题连着下一行一起拽走、有时只拽标题，两条一起写才稳。 */
+article h1,article h2,article h3,article h4,#meta{break-after:avoid; break-inside:avoid}
+article h1+*,article h2+*,article h3+*,article h4+*{break-before:avoid}
+/* 这些东西被切成两半就读不懂了 */
+article pre,article tr,article figure,.mjx-block,
+.facing,.d-del,.d-add{break-inside:avoid}
+/* 表格跨页时表头跟着重复 —— 第二页上一列没有抬头的数字没人看得懂 */
+article thead{display:table-header-group}
+article tfoot{display:table-footer-group}
+/* 图片限死一页高就不会被腰斩；宽高比交给浏览器的 max-* 算法自己保住 */
+article img{max-height:88vh; break-inside:avoid; border-radius:0; box-shadow:none}
+
+/* ---------- 4. 屏幕上能滚、纸上会被裁掉的地方 ---------- */
+/* 「横着还能滚」在纸上就是无声裁掉，而无声的失败正是这个项目最不能容忍的
+   东西。所有横向滚动区一律改成放开或折行。 */
+.tw{overflow:visible}
+article pre{overflow:visible; white-space:pre-wrap; word-break:break-word}
+.run-out{max-height:none; overflow:visible}
+.mjx-block{overflow:visible}
+/* 超长公式在屏幕上右缘渐隐，提示「还能往右滚」；纸上滚不动，渐隐就等于把
+   后半条公式擦掉。改成整条缩到版心宽度 —— 小一号总好过没有。 */
+.mjx-block.wide{-webkit-mask-image:none !important; mask-image:none !important;
+  text-align:center}
+.mjx-block mjx-container svg{max-width:100%; height:auto}
+
+/* ---------- 5. 链接 ---------- */
+/* 纸上点不动，蓝色就只是浅一层的灰。改成黑字加下划线；站外链接把地址用小
+   字附在后面 —— 否则读者拿到的纸上是一句「见这里」，而没有「这里」。 */
+article a{color:inherit !important; border-bottom:0 !important;
+  text-decoration:underline; text-decoration-thickness:.4pt;
+  text-underline-offset:2px}
+article a[href^="http"]::after{
+  content:" (" attr(href) ")";
+  font-family:var(--mono); font-size:.72em; color:#555; word-break:break-all;
+}
+/* 目录、标题、图片链接不附地址，附上去全是噪音。文内锚点和引用标记本来就是
+   #fn1 这种写法，压根不匹配上面的 http 前缀。 */
+.doc-toc a::after,.facing-img a::after,
+article h1 a::after,article h2 a::after,
+article h3 a::after,article h4 a::after{content:none}
+.xref,.xref-file{border-bottom:0; text-decoration:none}
+
+/* ---------- 6. 代码 ---------- */
+/* 屏幕上代码块靠灰底和正文分开。可浏览器默认不打印背景图形，那层灰底在别人
+   的打印机上根本不存在，只剩一段没有边界的等宽字；就算打印了，激光机也会把
+   它压成一片糊。改用一条细边框：背景开不开都看得出边界。 */
+article pre{background:none !important; border:.4pt solid #999;
+  border-radius:0; padding:.7em .8em}
+article code{background:none !important; padding:0}
+article kbd{background:none; border:.4pt solid #666; border-bottom-width:1pt}
+/* Pygments 的高亮在黑白机上只是深浅不一的灰，反而比纯黑难读。一律收黑，只
+   给注释留一档灰加斜体 —— 结构本来靠缩进和等宽字体就分辨得出来。 */
+.highlight span{color:#000 !important; background:none !important}
+.highlight .c,.highlight .c1,.highlight .cm,.highlight .cs,
+.highlight .cp,.highlight .ch,.highlight .cpf{color:#555 !important; font-style:italic}
+
+/* ---------- 7. 表格 ---------- */
+/* 学术印刷的惯例是三线表：顶线、表头线、底线，中间不画格。竖线和斑马纹在纸
+   上只会把眼睛引到线上去，而不是引到数字上。 */
+article table{border-top:.8pt solid #000; font-size:.88em}
+article th{border-bottom:.8pt solid #000; white-space:normal}
+article td{border-bottom:0}
+article tbody tr:last-child td{border-bottom:.8pt solid #000}
+article tbody tr:hover{background:none}
+
+/* ---------- 8. 其它块 ---------- */
+article strong,article th{font-weight:700}
+article blockquote{border-left:1.5pt solid #999}
+article hr{border-top:.4pt solid #999; margin:1.8em 0}
+article mark{
+  /* 高亮是少数几个非有背景不可的东西：底色一没，mark 就和正文完全一样了。
+     所以单独给它开 print-color-adjust，强制把这一小块灰印出来。 */
+  background:#e6e6e6 !important; border-radius:0; padding:.05em .18em;
+  -webkit-print-color-adjust:exact; print-color-adjust:exact;
+}
+.footnotes{font-size:.85em}
+#meta{margin-bottom:2rem; padding-bottom:1rem}
+
+/* ---------- 9. 版本对比 ---------- */
+/* 红和绿在黑白激光机上是同一个灰，所以纸上不靠颜色：删掉的那段用一条实线加
+   「−」，加上的用双线加「+」。屏幕上删掉的部分压暗到 .72 是为了让新内容跳
+   出来，纸上压暗只会变糊，所以还原成实的。 */
+.d-del,.d-add{background:none !important; opacity:1}
+.d-del{border-left:2pt solid #000}
+.d-add{border-left:4pt double #000}
+.d-del > :first-child::before{content:"− "; font-family:var(--mono); font-weight:700}
+.d-add > :first-child::before{content:"+ "; font-family:var(--mono); font-weight:700}
+
+/* ---------- 10. 对照版式 ---------- */
+.facing{border-bottom:0; margin-bottom:2rem; padding-bottom:0}
+.facing-img{position:static}
+.facing-img img{max-height:none}      /* 纸上没有「一屏」这回事 */
+
+/* ---------- 11. 排不出来的公式 ---------- */
+/* 「不允许静默出错」在纸上也算数。彩色打印机上它照旧是红的，黑白机上靠实线
+   框和等宽字认出来 —— 无论哪种机器，都不能印成一段看着像正文的东西。 */
+.mjx-failed{
+  background:none !important; outline:.6pt solid #000 !important; border-radius:0;
+  -webkit-print-color-adjust:exact; print-color-adjust:exact;
+}
+.mjx-warn{border-bottom:1pt dashed #000}
+
+}
 """
 
 
@@ -2497,6 +2661,7 @@ def build_html(md_path: Path, mathjax_js: str, watch: bool = False,
 <style>{CSS}</style>
 <style>{pygments_css()}</style>
 <style>{STYLE_CSS}</style>
+<style>{PRINT_CSS}</style>
 <script type="application/json" id="style-list">{json.dumps(STYLES, ensure_ascii=False)}</script>
 <script type="application/json" id="i18n">{json.dumps(UI, ensure_ascii=False)}</script>
 </head>

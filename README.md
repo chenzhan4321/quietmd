@@ -190,8 +190,21 @@ drafts.pdf  (73 pages, 4.2 MB, book layout)
 
 No LaTeX, no print dialog. The style you pick *is* the page design, so the same source
 gives you a LaTeX-looking article, a book, or a double-spaced typescript to mark up.
-Toolbar, sidebar and the corner note are left out, headings don't get stranded at the foot
-of a page, and the page is white — a style's background colour is a screen thing.
+
+Paper gets its own typesetting pass rather than a greyscale screenshot of the screen. The
+measure comes from the page margins — 32 mm a side, which puts an A4 line at about 36
+Chinese characters or 72 Latin ones — so the text sits centred with symmetric white space
+instead of running the full width of the sheet. Headings don't get stranded at the foot of
+a page, no paragraph leaves a single line behind, table headers repeat across a break,
+images aren't cut in half, and anything that scrolls sideways on screen — long code lines,
+wide equations, wide tables — wraps or shrinks rather than being silently cropped.
+External links print their address after them, since you can't click paper.
+
+Nothing relies on a background colour, because browsers don't print backgrounds by
+default: code blocks get a hairline rule, tables use the three-line academic form, and a
+diff marks deletions and additions with `−` and `+` rather than with red and green, which
+are the same grey on a laser printer. Page numbers come from your browser's print dialog
+(the "headers and footers" box) — the bottom margin leaves room for them.
 
 ## Styles
 
